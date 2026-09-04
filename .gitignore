@@ -1,0 +1,22 @@
+# Binaries
+/chameleon
+/build/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test artifacts
+*.test
+*.out
+
+# Scraper output
+/output/
+
+# OS and IDE files
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*~
