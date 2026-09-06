@@ -13,6 +13,7 @@ import (
 func (m *Model) addQueue(url string) {
 	m.queue = append(m.queue, url)
 	m.needsQueueUpdate = true
+	m.updateQueueContent()
 }
 
 func (m *Model) updateQueueContent() {
@@ -62,13 +63,16 @@ func (m *Model) updateQueueContent() {
 			statusBadge = badgeDefault
 		}
 
-		isSelected := m.activePanel == PanelQueue && i == m.queueCursor
+		isSelected := m.isQueueFocused() && i == m.queueCursor
 		prefix := "  "
 		urlStyle := styleNormalURL
 
 		if isSelected {
 			prefix = prefixSelected
 			urlStyle = styleSelectedURL
+			if m.confirmStopURL == q {
+				statusBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(m.theme.StatusStopped)).Render("[Confirm Stop? 's']")
+			}
 		}
 
 		// Truncate URL to fit in queue viewport
@@ -85,7 +89,7 @@ func (m *Model) updateQueueContent() {
 	m.queueViewport.SetContent(b.String())
 
 	// Auto-scroll viewport if cursor moved out of visible window
-	if m.activePanel == PanelQueue && m.queueViewport.Height > 0 {
+	if m.isQueueFocused() && m.queueViewport.Height > 0 {
 		if m.queueCursor < m.queueViewport.YOffset {
 			m.queueViewport.YOffset = m.queueCursor
 		} else if m.queueCursor >= m.queueViewport.YOffset+m.queueViewport.Height {
@@ -94,38 +98,63 @@ func (m *Model) updateQueueContent() {
 	}
 }
 
+func (m Model) isQueueFocused() bool {
+	if m.uiMode == UIModeTabbed {
+		return m.activeTab == TabQueue && m.focusTarget == FocusTabContent
+	}
+	return m.activePanel == PanelQueue
+}
+
 func (m *Model) updateQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "up", "k":
+		m.confirmStopURL = ""
 		if m.queueCursor > 0 {
 			m.queueCursor--
 			m.updateQueueContent()
 		}
 		return *m, nil
 	case "down", "j":
+		m.confirmStopURL = ""
 		if m.queueCursor < len(m.queue)-1 {
 			m.queueCursor++
 			m.updateQueueContent()
 		}
 		return *m, nil
 	case "P":
+		m.confirmStopURL = ""
 		m.eng.TogglePauseAll()
 		m.updateQueueContent()
 		return *m, nil
 	case "p", " ", "enter":
+		m.confirmStopURL = ""
 		if len(m.queue) > 0 && m.queueCursor >= 0 && m.queueCursor < len(m.queue) {
 			targetURL := m.queue[m.queueCursor]
 			m.eng.TogglePauseJob(targetURL)
 			m.updateQueueContent()
 		}
 		return *m, nil
+	case "esc":
+		if m.confirmStopURL != "" {
+			m.confirmStopURL = ""
+			m.updateQueueContent()
+			return *m, nil
+		}
 	case "s", "d", "delete", "backspace":
 		if len(m.queue) > 0 && m.queueCursor >= 0 && m.queueCursor < len(m.queue) {
 			targetURL := m.queue[m.queueCursor]
-			m.eng.StopJob(targetURL)
-			m.updateQueueContent()
+			if m.confirmStopURL == targetURL {
+				m.eng.StopJob(targetURL)
+				m.confirmStopURL = ""
+				m.updateQueueContent()
+			} else {
+				m.confirmStopURL = targetURL
+				m.updateQueueContent()
+			}
 		}
 		return *m, nil
+	default:
+		m.confirmStopURL = ""
 	}
 	var cmd tea.Cmd
 	m.queueViewport, cmd = m.queueViewport.Update(msg)

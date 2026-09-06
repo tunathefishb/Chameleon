@@ -230,3 +230,118 @@ func TestEngineImageScrapingAndRewriting(t *testing.T) {
 		}
 	}
 }
+
+func TestEnginePathTraversalProtection(t *testing.T) {
+	maliciousURLs := []string{
+		"http://example.com/../../etc/passwd",
+		"http://example.com/....//....//sensitive",
+		"http://example.com/static/../../../root/secret.txt",
+	}
+
+	for _, raw := range maliciousURLs {
+		parsed, err := http.NewRequest(http.MethodGet, raw, nil)
+		if err != nil {
+			t.Fatalf("failed to parse url: %v", err)
+		}
+		savePath := resolveSavePath(parsed.URL, false)
+		if savePath != "" {
+			expectedPrefix := filepath.Clean(filepath.Join("output", "example.com"))
+			if !strings.HasPrefix(filepath.Clean(savePath), expectedPrefix) {
+				t.Fatalf("path traversal escape detected for %s: resolved to %s (not prefixed by %s)", raw, savePath, expectedPrefix)
+			}
+		}
+	}
+}
+
+func TestEngineRetryStoppedJob(t *testing.T) {
+	eng := NewEngine()
+	targetURL := "https://example.com/retry-test"
+	settings := Settings{Depth: 1, Speed: SpeedSafe}
+
+	eng.AddJob(targetURL, settings)
+	if eng.GetJobStatus(targetURL) != StatusQueued {
+		t.Fatalf("expected initial status Queued, got %s", eng.GetJobStatus(targetURL))
+	}
+
+	eng.StopJob(targetURL)
+	if eng.GetJobStatus(targetURL) != StatusStopped {
+		t.Fatalf("expected status Stopped, got %s", eng.GetJobStatus(targetURL))
+	}
+
+	// Re-add the same stopped job
+	eng.AddJob(targetURL, settings)
+	if eng.GetJobStatus(targetURL) != StatusQueued {
+		t.Fatalf("expected status Queued after re-adding stopped job, got %s", eng.GetJobStatus(targetURL))
+	}
+}
+
+func TestEngineBoundedReading(t *testing.T) {
+	// Server returns a response larger than maxResponseBodySize (10MB)
+	chunk := make([]byte, 1024*1024) // 1MB
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		for range 12 { // 12MB total
+			_, _ = w.Write(chunk)
+		}
+	}))
+	defer ts.Close()
+
+	eng := NewEngine()
+	eng.Start(1)
+	defer func() {
+		eng.Stop()
+		os.RemoveAll("output")
+	}()
+
+	eng.AddJob(ts.URL, Settings{Depth: 1, Speed: SpeedFast})
+
+	select {
+	case res := <-eng.Results:
+		if res.Status != "200" {
+			t.Fatalf("expected status 200, got %s", res.Status)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for bounded read result")
+	}
+
+	var savedFilePath string
+	select {
+	case savedFilePath = <-eng.Files:
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for file to be saved")
+	}
+
+	// Verify saved file size is bounded to <= 10MB
+	fi, err := os.Stat(savedFilePath)
+	if err != nil {
+		t.Fatalf("failed to stat saved file: %v", err)
+	}
+	if fi.Size() > 10*1024*1024 {
+		t.Fatalf("saved file size %d exceeds 10MB bound", fi.Size())
+	}
+}
+
+func TestEngineHasActiveWork(t *testing.T) {
+	defer os.RemoveAll("output")
+	eng := NewEngine()
+	defer eng.Stop()
+
+	if eng.HasActiveWork() {
+		t.Fatalf("expected HasActiveWork to be false initially")
+	}
+
+	eng.jobStates.Store("http://example.com/test", StatusQueued)
+	if !eng.HasActiveWork() {
+		t.Fatalf("expected HasActiveWork to be true when a job is queued")
+	}
+
+	eng.jobStates.Store("http://example.com/test", StatusRunning)
+	if !eng.HasActiveWork() {
+		t.Fatalf("expected HasActiveWork to be true when a job is running")
+	}
+
+	eng.jobStates.Store("http://example.com/test", StatusDone)
+	if eng.HasActiveWork() {
+		t.Fatalf("expected HasActiveWork to be false when all jobs are done")
+	}
+}

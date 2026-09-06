@@ -1,6 +1,7 @@
 package analyzer
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -12,6 +13,11 @@ import (
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
+)
+
+var (
+	classHashRegex = regexp.MustCompile(`^[a-zA-Z0-9_-]{5,10}$`)
+	hexHashRegex   = regexp.MustCompile(`^[a-f0-9]{6,}$`)
 )
 
 // Report contains the results of the scrapability and ethical analysis.
@@ -188,8 +194,8 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 	lines := strings.Split(robotsText, "\n")
 
 	isGlobalAgent := false
-	disallowedAll := false
-	disallowedTarget := false
+	var matchedDisallow string
+	var matchedAllow string
 	var crawlDelay float64
 	hasSitemap := false
 
@@ -215,7 +221,8 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 		val := strings.TrimSpace(parts[1])
 
 		if key == "user-agent" {
-			if val == "*" {
+			agent := strings.ToLower(val)
+			if agent == "*" || strings.Contains(agent, "chameleon") {
 				isGlobalAgent = true
 			} else {
 				isGlobalAgent = false
@@ -228,10 +235,17 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 
 		if isGlobalAgent {
 			if key == "disallow" {
-				if val == "/" {
-					disallowedAll = true
-				} else if val != "" && strings.HasPrefix(targetPath, val) {
-					disallowedTarget = true
+				if val != "" && strings.HasPrefix(targetPath, val) {
+					if len(val) >= len(matchedDisallow) {
+						matchedDisallow = val
+					}
+				}
+			}
+			if key == "allow" {
+				if val != "" && strings.HasPrefix(targetPath, val) {
+					if len(val) >= len(matchedAllow) {
+						matchedAllow = val
+					}
 				}
 			}
 			if key == "crawl-delay" {
@@ -242,16 +256,28 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 		}
 	}
 
-	switch {
-	case disallowedAll:
-		report.EthicalScore -= 60
-		report.EthicalDetails = append(report.EthicalDetails, "❌ robots.txt strictly disallows all crawling ('Disallow: /')")
-		report.DifficultyScore++
-	case disallowedTarget:
-		report.EthicalScore -= 35
-		report.EthicalDetails = append(report.EthicalDetails, fmt.Sprintf("⚠️ robots.txt disallows path matching '%s'", targetPath))
-	default:
-		report.EthicalDetails = append(report.EthicalDetails, "✅ robots.txt allows crawling target path")
+	isDisallowed := false
+	if matchedDisallow != "" {
+		if matchedAllow == "" || len(matchedDisallow) > len(matchedAllow) {
+			isDisallowed = true
+		}
+	}
+
+	if isDisallowed {
+		if matchedDisallow == "/" {
+			report.EthicalScore -= 60
+			report.EthicalDetails = append(report.EthicalDetails, "❌ robots.txt strictly disallows all crawling ('Disallow: /')")
+			report.DifficultyScore++
+		} else {
+			report.EthicalScore -= 35
+			report.EthicalDetails = append(report.EthicalDetails, fmt.Sprintf("⚠️ robots.txt disallows path matching '%s'", matchedDisallow))
+		}
+	} else {
+		if matchedAllow != "" {
+			report.EthicalDetails = append(report.EthicalDetails, fmt.Sprintf("✅ robots.txt explicitly allows path matching '%s'", matchedAllow))
+		} else {
+			report.EthicalDetails = append(report.EthicalDetails, "✅ robots.txt allows crawling target path")
+		}
 	}
 
 	if crawlDelay > 0 {
@@ -332,7 +358,7 @@ func (a *Analyzer) inspectHeaders(statusCode int, header http.Header, report *Re
 }
 
 func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) {
-	doc, err := goquery.NewDocumentFromReader(strings.NewReader(string(bodyBytes)))
+	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
 	if err != nil {
 		return
 	}
@@ -374,8 +400,6 @@ func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) 
 	// 2. Class Obfuscation / CSS Hashes
 	obfuscatedClasses := 0
 	sampleClasses := 0
-	classHashRegex := regexp.MustCompile(`^[a-zA-Z0-9_-]{5,10}$`)
-	hexHashRegex := regexp.MustCompile(`^[a-f0-9]{6,}$`)
 
 	doc.Find("[class]").Each(func(_ int, s *goquery.Selection) {
 		if sampleClasses > 50 {

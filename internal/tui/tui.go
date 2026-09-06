@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"os"
 	"time"
 
 	"chameleon/internal/engine"
@@ -85,6 +86,9 @@ type Model struct {
 	eng              *engine.Engine
 	queue            []string
 	files            []string
+	savedFiles       []SavedFileEntry
+	filesCursor      int
+	totalSavedSize   int64
 	telemetryItems   []engine.Result
 	selectedItem     *engine.Result
 	latestReport     *analyzer.Report
@@ -97,6 +101,31 @@ type Model struct {
 	showHelp         bool
 	needsQueueUpdate bool
 	needsFilesUpdate bool
+	reducedMotion    bool
+	spinnerRunning   bool
+	confirmStopURL   string
+	inputError       string
+}
+
+func (m Model) hasActiveWork() bool {
+	if m.isAnalyzing {
+		return true
+	}
+	if m.eng != nil && m.eng.HasActiveWork() {
+		return true
+	}
+	if time.Since(m.lastTelemetry) < 2*time.Second {
+		return true
+	}
+	return false
+}
+
+func (m *Model) startSpinnerCmd() tea.Cmd {
+	if !m.reducedMotion && !m.spinnerRunning {
+		m.spinnerRunning = true
+		return m.spinner.Tick
+	}
+	return nil
 }
 
 func InitialModel(eng *engine.Engine, themes ...Theme) Model {
@@ -104,6 +133,12 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 	if len(themes) > 0 {
 		theme = themes[0]
 	}
+
+	uiMode := UIModeGrid
+	if os.Getenv("ACCESSIBILITY_ENABLED") == "1" {
+		uiMode = UIModeTabbed
+	}
+	reducedMotion := os.Getenv("REDUCED_MOTION") == "1" || os.Getenv("NO_ANIMATIONS") == "1"
 
 	ti := textinput.New()
 	ti.Prompt = ""
@@ -158,7 +193,7 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AccentColor))
 
 	return Model{
-		uiMode:          UIModeGrid,
+		uiMode:          uiMode,
 		manualUIMode:    false,
 		activeTab:       TabQueue,
 		focusTarget:     FocusURLInput,
@@ -180,22 +215,30 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 		eng:            eng,
 		queue:          []string{},
 		files:          []string{},
+		savedFiles:     []SavedFileEntry{},
+		filesCursor:    0,
+		totalSavedSize: 0,
 		telemetryItems: []engine.Result{},
 		totalTelemetry: 0,
 		spinner:        sp,
 		theme:          theme,
+		reducedMotion:  reducedMotion,
+		spinnerRunning: false,
 	}
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		textinput.Blink,
-		m.spinner.Tick,
 		waitForResult(m.eng.Results),
 		waitForFile(m.eng.Files),
 		waitForDiscovered(m.eng.Discovered),
 		waitForAnalysis(m.eng.Analysis),
-	)
+	}
+	if !m.reducedMotion && m.hasActiveWork() {
+		cmds = append(cmds, m.spinner.Tick)
+	}
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) focusPanel(p Panel) {
@@ -213,6 +256,7 @@ func (m *Model) focusPanel(p Panel) {
 	}
 
 	m.updateQueueContent()
+	m.updateFilesContent()
 }
 
 func (m *Model) nextPanel() {
@@ -233,6 +277,7 @@ func (m *Model) focusTab(t ActiveTab) {
 		}
 	}
 	m.updateQueueContent()
+	m.updateFilesContent()
 }
 
 func (m *Model) nextTab() {
@@ -257,4 +302,5 @@ func (m *Model) setFocusTarget(target FocusArea) {
 		}
 	}
 	m.updateQueueContent()
+	m.updateFilesContent()
 }

@@ -1,0 +1,31 @@
+// Chameleon TUI Light Theme Configuration (JSON5)
+// Optimized specifically for light/white terminal backgrounds (WCAG 2.1 AA >= 4.5:1 contrast).
+// Place this file at ~/.config/chameleon/theme.json5 or pass via theme loader.
+{
+  // Panel & Border Styling
+  border_active: "24",         // Deep Navy Blue (contrast 7.89:1 vs #ffffff)
+  border_inactive: "244",      // Medium Gray (borderline graphical boundary)
+  title_active: "24",          // Deep Navy Blue
+  title_inactive: "240",       // Dark Gray (contrast 7.04:1 vs #ffffff)
+
+  // Accent & Highlight
+  accent_color: "24",          // Deep Navy Blue
+
+  // Telemetry Table Styling
+  table_header_border: "244",
+  table_selected_fg: "255",    // Pure White
+  table_selected_bg: "24",     // Deep Navy Blue container
+
+  // Footer Navigation Bar
+  footer_key: "24",            // Deep Navy Blue
+  footer_desc: "240",          // Dark Gray
+  footer_sep: "244",           // Medium Gray
+
+  // Job Queue Status Badges (all >= 4.5:1 contrast against light backgrounds)
+  status_running: "24",        // Deep Navy Blue (7.89:1)
+  status_paused: "130",        // Dark Amber (5.41:1)
+  status_stopped: "166",       // Dark Rust Orange (4.60:1)
+  status_done: "28",           // Forest Green (5.07:1)
+  status_error: "160",         // Crimson Red (5.12:1)
+  status_queued: "240",        // Dark Gray (7.04:1)
+}

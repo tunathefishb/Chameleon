@@ -83,7 +83,7 @@ func (m *Model) updateVerboseContent(res engine.Result) {
 	}
 
 	b.WriteString("\n  ")
-	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	hintStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("246"))
 	b.WriteString(hintStyle.Render("[Esc / Enter / q: Back to Telemetry Table]"))
 	b.WriteString("\n")
 

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -114,5 +115,39 @@ func TestAnalyzer_WithHeadless(t *testing.T) {
 
 	if !report.HeadlessTested {
 		t.Errorf("expected HeadlessTested to be true")
+	}
+}
+
+func TestAnalyzer_RobotsAllowOverride(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/robots.txt", func(w http.ResponseWriter, _ *http.Request) {
+		fmt.Fprintln(w, "User-agent: *\nDisallow: /\nAllow: /public/")
+	})
+	mux.HandleFunc("/public/article", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintln(w, "<html><body><p>Public Content</p></body></html>")
+	})
+
+	server := httptest.NewServer(mux)
+	defer server.Close()
+
+	az := NewAnalyzer(server.Client(), nil)
+	report, err := az.Analyze(context.Background(), server.URL+"/public/article")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if report.EthicalScore < 90 {
+		t.Errorf("expected high ethical score >= 90 due to Allow rule override, got %d", report.EthicalScore)
+	}
+	foundAllow := false
+	for _, detail := range report.EthicalDetails {
+		if strings.Contains(detail, "explicitly allows path matching") {
+			foundAllow = true
+			break
+		}
+	}
+	if !foundAllow {
+		t.Errorf("expected ethical details to mention explicit allow, got: %v", report.EthicalDetails)
 	}
 }

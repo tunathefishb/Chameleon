@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"net/url"
 	"strings"
 	"time"
 
@@ -13,7 +14,6 @@ import (
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
 	var cmds []tea.Cmd
 
 	switch msg := msg.(type) {
@@ -65,8 +65,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.activePanel == PanelInput {
 				val := strings.TrimSpace(m.textInput.Value())
 				if val != "" {
-					m.startAnalysis(val)
-					return m, nil
+					normalized := val
+					if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+						normalized = "https://" + normalized
+					}
+					parsed, err := url.Parse(normalized)
+					if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") || (!strings.Contains(parsed.Host, ".") && parsed.Host != "localhost") {
+						m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
+						return m, nil
+					}
+					m.inputError = ""
+					cmd := m.startAnalysis(val)
+					if cmd != nil {
+						cmds = append(cmds, cmd)
+					}
+					return m, tea.Batch(cmds...)
 				}
 			}
 			// Toggle center view mode
@@ -89,8 +102,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateTable(msg)
 
 		case PanelFiles:
-			m.filesViewport, cmd = m.filesViewport.Update(msg)
-			cmds = append(cmds, cmd)
+			return m.updateFilesKey(msg)
 
 		case PanelSettings:
 			return m.updateSettings(msg)
@@ -113,14 +125,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.table.SetRows(rows)
 		m.needsQueueUpdate = true
 		cmds = append(cmds, waitForResult(m.eng.Results))
+		if cmd := m.startSpinnerCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case engineFileMsg:
 		m.addFile(string(msg))
 		cmds = append(cmds, waitForFile(m.eng.Files))
+		if cmd := m.startSpinnerCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case engineDiscoveredMsg:
 		m.addQueue(string(msg))
 		cmds = append(cmds, waitForDiscovered(m.eng.Discovered))
+		if cmd := m.startSpinnerCmd(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 
 	case engineAnalysisMsg:
 		r := analyzer.Report(msg)
@@ -131,8 +152,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, waitForAnalysis(m.eng.Analysis))
 
 	case spinner.TickMsg:
-		var cmd tea.Cmd
-		m.spinner, cmd = m.spinner.Update(msg)
 		if m.needsQueueUpdate {
 			m.updateQueueContent()
 			m.needsQueueUpdate = false
@@ -141,7 +160,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.updateFilesContent()
 			m.needsFilesUpdate = false
 		}
-		cmds = append(cmds, cmd)
+		if !m.reducedMotion && m.hasActiveWork() {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			m.spinnerRunning = true
+			cmds = append(cmds, cmd)
+		} else {
+			m.spinnerRunning = false
+		}
 
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
@@ -214,6 +240,9 @@ func (m *Model) syncDimensions() {
 		m.updateTableColumns(tableWidth)
 		m.textInput.Width = m.layout.BottomLeftWidth - 8
 	}
+
+	m.updateFilesContent()
+	m.updateQueueContent()
 }
 
 func (m *Model) updateTableColumns(tableWidth int) {
@@ -244,15 +273,28 @@ func (m *Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "enter" {
 		val := strings.TrimSpace(m.textInput.Value())
 		if val != "" {
-			if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
-				val = "https://" + val
+			normalized := val
+			if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+				normalized = "https://" + normalized
 			}
-			m.eng.AddJob(val, m.settings)
-			m.addQueue(val)
+			parsed, err := url.Parse(normalized)
+			if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") || (!strings.Contains(parsed.Host, ".") && parsed.Host != "localhost") {
+				m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
+				return *m, nil
+			}
+
+			m.inputError = ""
+			m.eng.AddJob(normalized, m.settings)
+			m.addQueue(normalized)
 			m.textInput.SetValue("")
+			if cmd := m.startSpinnerCmd(); cmd != nil {
+				return *m, cmd
+			}
 		}
 		return *m, nil
 	}
+
+	m.inputError = ""
 	var cmd tea.Cmd
 	m.textInput, cmd = m.textInput.Update(msg)
 	return *m, cmd

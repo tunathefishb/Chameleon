@@ -254,17 +254,31 @@ func TestQueueJobManagement(t *testing.T) {
 		t.Fatalf("expected job2 status Queued after resume, got %s", m.eng.GetJobStatus(url2))
 	}
 
-	// Move cursor up to job1 and stop it via 's'
+	// Move cursor up to job1 and stop it via 's' (with confirmation safeguard)
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	m = next.(Model)
 	if m.queueCursor != 0 {
 		t.Fatalf("expected queueCursor 0 after up arrow, got %d", m.queueCursor)
 	}
 
+	// First 's' primes confirmation safeguard
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
+	m = next.(Model)
+	if m.confirmStopURL != url1 {
+		t.Fatalf("expected confirmStopURL %s, got %s", url1, m.confirmStopURL)
+	}
+	if !strings.Contains(m.View(), "Confirm Stop") {
+		t.Errorf("expected view to display confirmation prompt")
+	}
+	if m.eng.GetJobStatus(url1) == engine.StatusStopped {
+		t.Fatalf("job1 should not be stopped before confirmation")
+	}
+
+	// Second 's' confirms stop
 	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
 	m = next.(Model)
 	if m.eng.GetJobStatus(url1) != engine.StatusStopped {
-		t.Fatalf("expected job1 status Stopped, got %s", m.eng.GetJobStatus(url1))
+		t.Fatalf("expected job1 status Stopped after confirmation, got %s", m.eng.GetJobStatus(url1))
 	}
 
 	view = m.View()
@@ -564,5 +578,30 @@ func TestFooterResponsiveTruncation(t *testing.T) {
 				t.Errorf("expected footer at width %d to contain mode badge %q, got: %q", w, badge, footer)
 			}
 		}
+	}
+}
+
+func TestCommandsChannelClosed(t *testing.T) {
+	eng := engine.NewEngine()
+	eng.Stop() // closes all channels
+
+	cmdResult := waitForResult(eng.Results)
+	if msg := cmdResult(); msg != nil {
+		t.Fatalf("expected waitForResult to return nil on closed channel, got %#v", msg)
+	}
+
+	cmdFile := waitForFile(eng.Files)
+	if msg := cmdFile(); msg != nil {
+		t.Fatalf("expected waitForFile to return nil on closed channel, got %#v", msg)
+	}
+
+	cmdDiscovered := waitForDiscovered(eng.Discovered)
+	if msg := cmdDiscovered(); msg != nil {
+		t.Fatalf("expected waitForDiscovered to return nil on closed channel, got %#v", msg)
+	}
+
+	cmdAnalysis := waitForAnalysis(eng.Analysis)
+	if msg := cmdAnalysis(); msg != nil {
+		t.Fatalf("expected waitForAnalysis to return nil on closed channel, got %#v", msg)
 	}
 }

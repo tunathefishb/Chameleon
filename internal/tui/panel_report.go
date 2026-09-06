@@ -4,13 +4,14 @@ import (
 	"fmt"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 )
 
-func (m *Model) startAnalysis(targetURL string) {
+func (m *Model) startAnalysis(targetURL string) tea.Cmd {
 	targetURL = strings.TrimSpace(targetURL)
 	if targetURL == "" {
-		return
+		return nil
 	}
 	if !strings.HasPrefix(targetURL, "http://") && !strings.HasPrefix(targetURL, "https://") {
 		targetURL = "https://" + targetURL
@@ -20,6 +21,7 @@ func (m *Model) startAnalysis(targetURL string) {
 	m.centerMode = CenterViewReport
 	m.updateReportContent()
 	m.eng.AnalyzeURL(targetURL)
+	return m.startSpinnerCmd()
 }
 
 func (m *Model) updateReportContent() {

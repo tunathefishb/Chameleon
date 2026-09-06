@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -84,6 +85,7 @@ type Engine struct {
 	pausedJobs map[string]Job
 	allJobsMu  sync.Mutex
 	allJobs    map[string]Job
+	stopOnce   sync.Once
 }
 
 func NewEngine() *Engine {
@@ -113,23 +115,50 @@ func (e *Engine) Start(workers int) {
 }
 
 func (e *Engine) Stop() {
-	e.cancel()
-	e.wg.Wait()
-	close(e.Jobs)
-	close(e.Results)
-	close(e.Files)
-	close(e.Discovered)
-	close(e.Analysis)
+	e.stopOnce.Do(func() {
+		e.cancel()
+		e.wg.Wait()
+		close(e.Jobs)
+		close(e.Results)
+		close(e.Files)
+		close(e.Discovered)
+		close(e.Analysis)
+	})
 }
 
-func (e *Engine) AddJob(url string, settings Settings) {
-	if _, loaded := e.visited.LoadOrStore(url, true); !loaded {
-		job := Job{URL: url, Settings: settings, Depth: 0}
+func (e *Engine) AddJob(rawURL string, settings Settings) {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		return
+	}
+	targetURL := rawURL
+	if parsed, err := url.Parse(rawURL); err == nil {
+		parsed.Fragment = ""
+		targetURL = parsed.String()
+	}
+
+	st := e.GetJobStatus(targetURL)
+	if st == StatusError || st == StatusStopped {
+		e.visited.Delete(targetURL)
+	}
+
+	if _, loaded := e.visited.LoadOrStore(targetURL, true); !loaded {
+		job := Job{URL: targetURL, Settings: settings, Depth: 0}
 		e.allJobsMu.Lock()
-		e.allJobs[url] = job
+		e.allJobs[targetURL] = job
 		e.allJobsMu.Unlock()
-		e.jobStates.Store(url, StatusQueued)
-		e.Jobs <- job
+		e.jobStates.Store(targetURL, StatusQueued)
+
+		select {
+		case e.Jobs <- job:
+		default:
+			go func() {
+				select {
+				case <-e.ctx.Done():
+				case e.Jobs <- job:
+				}
+			}()
+		}
 	}
 }
 
@@ -189,7 +218,12 @@ func (e *Engine) ResumeJob(url string) {
 		select {
 		case e.Jobs <- job:
 		default:
-			go func() { e.Jobs <- job }()
+			go func() {
+				select {
+				case <-e.ctx.Done():
+				case e.Jobs <- job:
+				}
+			}()
 		}
 	}
 }
@@ -201,11 +235,28 @@ func (e *Engine) StopJob(url string) {
 	delete(e.pausedJobs, url)
 	e.pausedMu.Unlock()
 
+	e.visited.Delete(url)
+
 	if cancelVal, ok := e.jobCancels.Load(url); ok {
 		if cancelFn, isFn := cancelVal.(context.CancelFunc); isFn {
 			cancelFn()
 		}
 	}
+}
+
+// HasActiveWork returns true if there are any jobs currently queued or running.
+func (e *Engine) HasActiveWork() bool {
+	hasWork := false
+	e.jobStates.Range(func(key, val any) bool {
+		if st, ok := val.(JobStatus); ok {
+			if st == StatusQueued || st == StatusRunning {
+				hasWork = true
+				return false
+			}
+		}
+		return true
+	})
+	return hasWork
 }
 
 func (e *Engine) TogglePauseJob(url string) {
@@ -292,7 +343,9 @@ func (e *Engine) TogglePauseAll() bool {
 }
 
 func (e *Engine) AnalyzeURL(targetURL string) {
+	e.wg.Add(1)
 	go func() {
+		defer e.wg.Done()
 		report, err := e.analyzer.Analyze(e.ctx, targetURL)
 		if err == nil && report != nil {
 			select {
@@ -301,6 +354,45 @@ func (e *Engine) AnalyzeURL(targetURL string) {
 			}
 		}
 	}()
+}
+
+func resolveSavePath(u *url.URL, isImage bool) string {
+	host := u.Host
+	if host == "" {
+		host = "unknown"
+	}
+	host = strings.ReplaceAll(host, "/", "_")
+	host = strings.ReplaceAll(host, "\\", "_")
+	host = strings.ReplaceAll(host, "..", "_")
+	host = strings.Trim(host, ". ")
+	if host == "" {
+		host = "unknown"
+	}
+
+	baseDir := filepath.Join("output", host)
+
+	cleanPath := path.Clean("/" + u.Path)
+	cleanPath = strings.TrimPrefix(cleanPath, "/")
+
+	var targetRel string
+	if cleanPath == "" || strings.HasSuffix(u.Path, "/") {
+		if isImage {
+			targetRel = filepath.Join(filepath.FromSlash(cleanPath), "image")
+		} else {
+			targetRel = filepath.Join(filepath.FromSlash(cleanPath), "index.html")
+		}
+	} else {
+		targetRel = filepath.FromSlash(cleanPath)
+	}
+
+	fullPath := filepath.Join(baseDir, targetRel)
+
+	cleanBase := filepath.Clean(baseDir)
+	cleanFull := filepath.Clean(fullPath)
+	if !strings.HasPrefix(cleanFull, cleanBase+string(filepath.Separator)) && cleanFull != cleanBase {
+		return ""
+	}
+	return cleanFull
 }
 
 func (e *Engine) worker() {
@@ -428,10 +520,11 @@ func (e *Engine) processJob(job Job) {
 		contentType = "unknown"
 	}
 
-	bodyBytes, err := io.ReadAll(resp.Body)
+	const maxResponseBodySize = 10 * 1024 * 1024 // 10MB bounded read limit
+	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodySize))
 	if err != nil {
 		e.jobStates.Store(job.URL, StatusError)
-		e.Results <- Result{
+		e.sendResult(Result{
 			Name:            job.URL,
 			Status:          "ERR",
 			Type:            contentType,
@@ -443,7 +536,7 @@ func (e *Engine) processJob(job Job) {
 			ResponseHeaders: resp.Header.Clone(),
 			ErrorMsg:        fmt.Sprintf("read response body error: %v", err),
 			Timestamp:       start,
-		}
+		})
 		return
 	}
 
@@ -464,7 +557,7 @@ func (e *Engine) processJob(job Job) {
 
 	e.jobStates.Store(job.URL, StatusDone)
 
-	e.Results <- Result{
+	e.sendResult(Result{
 		Name:            name,
 		Status:          status,
 		Type:            contentType,
@@ -475,15 +568,28 @@ func (e *Engine) processJob(job Job) {
 		StatusCode:      resp.StatusCode,
 		ResponseHeaders: resp.Header.Clone(),
 		Timestamp:       start,
-	}
+	})
 
 	// 2. Save File & Process HTML
 	if resp.StatusCode == http.StatusOK {
-		savePath := filepath.Join("output", parsedURL.Host, parsedURL.Path)
-		if strings.HasSuffix(job.URL, "/") || parsedURL.Path == "" {
-			savePath = filepath.Join(savePath, "index.html")
+		isImg := strings.HasPrefix(contentType, "image/")
+		savePath := resolveSavePath(parsedURL, isImg)
+		if savePath == "" {
+			return
+		}
+
+		// Handle directory/file name conflicts
+		if fi, err := os.Stat(savePath); err == nil && fi.IsDir() {
+			if isImg {
+				savePath = filepath.Join(savePath, "image")
+			} else {
+				savePath = filepath.Join(savePath, "index.html")
+			}
 		}
 		htmlDir := filepath.Dir(savePath)
+		if fi, err := os.Stat(htmlDir); err == nil && !fi.IsDir() {
+			_ = os.Rename(htmlDir, htmlDir+".file")
+		}
 
 		// Check if HTML and process links & images
 		if strings.Contains(contentType, "text/html") {
@@ -505,9 +611,9 @@ func (e *Engine) processJob(job Job) {
 						imgURL.Fragment = ""
 						imgURLStr := imgURL.String()
 
-						imgSavePath := filepath.Join("output", imgURL.Host, imgURL.Path)
-						if strings.HasSuffix(imgURLStr, "/") || imgURL.Path == "" {
-							imgSavePath = filepath.Join(imgSavePath, "image")
+						imgSavePath := resolveSavePath(imgURL, true)
+						if imgSavePath == "" {
+							return rawSrc, false
 						}
 
 						if _, loaded := e.visited.LoadOrStore(imgURLStr, true); !loaded {
@@ -524,12 +630,14 @@ func (e *Engine) processJob(job Job) {
 							select {
 							case e.Jobs <- imgJob:
 							default:
-								go func() { e.Jobs <- imgJob }()
+								go func() {
+									select {
+									case <-e.ctx.Done():
+									case e.Jobs <- imgJob:
+									}
+								}()
 							}
-							select {
-							case e.Discovered <- imgURLStr:
-							default:
-							}
+							e.sendDiscovered(imgURLStr)
 						}
 
 						relPath, err := filepath.Rel(htmlDir, imgSavePath)
@@ -622,12 +730,14 @@ func (e *Engine) processJob(job Job) {
 										select {
 										case e.Jobs <- childJob:
 										default:
-											go func() { e.Jobs <- childJob }()
+											go func() {
+												select {
+												case <-e.ctx.Done():
+												case e.Jobs <- childJob:
+												}
+											}()
 										}
-										select {
-										case e.Discovered <- urlStr:
-										default:
-										}
+										e.sendDiscovered(urlStr)
 									}
 								}
 							}
@@ -647,8 +757,50 @@ func (e *Engine) processJob(job Job) {
 		if err == nil {
 			err = os.WriteFile(savePath, bodyBytes, 0600)
 			if err == nil {
-				e.Files <- savePath
+				e.sendFile(savePath)
 			}
 		}
+	}
+}
+
+func (e *Engine) sendResult(res Result) {
+	select {
+	case <-e.ctx.Done():
+	case e.Results <- res:
+	default:
+		go func() {
+			select {
+			case <-e.ctx.Done():
+			case e.Results <- res:
+			}
+		}()
+	}
+}
+
+func (e *Engine) sendFile(path string) {
+	select {
+	case <-e.ctx.Done():
+	case e.Files <- path:
+	default:
+		go func() {
+			select {
+			case <-e.ctx.Done():
+			case e.Files <- path:
+			}
+		}()
+	}
+}
+
+func (e *Engine) sendDiscovered(u string) {
+	select {
+	case <-e.ctx.Done():
+	case e.Discovered <- u:
+	default:
+		go func() {
+			select {
+			case <-e.ctx.Done():
+			case e.Discovered <- u:
+			}
+		}()
 	}
 }

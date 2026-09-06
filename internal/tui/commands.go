@@ -15,24 +15,40 @@ type engineAnalysisMsg analyzer.Report
 
 func waitForResult(c chan engine.Result) tea.Cmd {
 	return func() tea.Msg {
-		return engineResultMsg(<-c)
+		res, ok := <-c
+		if !ok {
+			return nil
+		}
+		return engineResultMsg(res)
 	}
 }
 
 func waitForFile(c chan string) tea.Cmd {
 	return func() tea.Msg {
-		return engineFileMsg(<-c)
+		file, ok := <-c
+		if !ok {
+			return nil
+		}
+		return engineFileMsg(file)
 	}
 }
 
 func waitForDiscovered(c chan string) tea.Cmd {
 	return func() tea.Msg {
-		return engineDiscoveredMsg(<-c)
+		url, ok := <-c
+		if !ok {
+			return nil
+		}
+		return engineDiscoveredMsg(url)
 	}
 }
 
 func waitForAnalysis(c chan analyzer.Report) tea.Cmd {
 	return func() tea.Msg {
-		return engineAnalysisMsg(<-c)
+		report, ok := <-c
+		if !ok {
+			return nil
+		}
+		return engineAnalysisMsg(report)
 	}
 }

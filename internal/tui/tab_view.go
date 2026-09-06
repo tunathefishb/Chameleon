@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"chameleon/internal/engine"
 
@@ -66,14 +65,23 @@ func (m Model) renderTabBar() string {
 
 	totalTabWidth := lipgloss.Width(tabLine)
 	modeWidth := lipgloss.Width(modePill)
-	spacerWidth := m.width - totalTabWidth - modeWidth
+
+	// Inset by 1 space on left and right to align perfectly with the central panel
+	// borders and inner content area (columns 1 to w-2).
+	leftPad := " "
+	rightPad := " "
+	spacerWidth := m.width - totalTabWidth - modeWidth - len(leftPad) - len(rightPad)
 	if spacerWidth < 1 {
 		spacerWidth = 1
 	}
 
-	headerLine := tabLine + strings.Repeat(" ", spacerWidth) + modePill
+	headerLine := leftPad + tabLine + strings.Repeat(" ", spacerWidth) + modePill + rightPad
 	if lipgloss.Width(headerLine) > m.width {
-		headerLine = tabLine
+		if lipgloss.Width(leftPad+tabLine) <= m.width {
+			headerLine = leftPad + tabLine
+		} else {
+			headerLine = tabLine
+		}
 	}
 
 	return lipgloss.NewStyle().MaxWidth(m.width).Render(headerLine)
@@ -171,6 +179,10 @@ func (m Model) renderBottomURLBar(w int) string {
 	m.textInput.Width = inputWidth
 
 	line2 := prompt + m.textInput.View()
+	if m.inputError != "" {
+		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.StatusError)).Bold(true)
+		line2 += "  " + errStyle.Render(m.inputError)
+	}
 
 	return lipgloss.JoinVertical(lipgloss.Left,
 		lipgloss.NewStyle().MaxWidth(w).Render(line1),
@@ -201,12 +213,20 @@ func (m Model) tabbedFooterItems() (string, []footerItem, []footerItem) {
 	switch m.activeTab {
 	case TabQueue:
 		modeBadge = "TAB 1: QUEUE"
-		contextActions = []footerItem{
-			{Key: "Space", Desc: "Pause/Resume"},
-			{Key: "P", Desc: "Pause All"},
-			{Key: "s", Desc: "Stop"},
-			{Key: "↑/↓", Desc: "Select"},
-			{Key: "Tab", Desc: "Focus URL"},
+		if m.confirmStopURL != "" {
+			contextActions = []footerItem{
+				{Key: "s", Desc: "Confirm Stop"},
+				{Key: "Esc", Desc: "Cancel"},
+				{Key: "Tab", Desc: "Focus URL"},
+			}
+		} else {
+			contextActions = []footerItem{
+				{Key: "Space", Desc: "Pause/Resume"},
+				{Key: "P", Desc: "Pause All"},
+				{Key: "s", Desc: "Stop"},
+				{Key: "↑/↓", Desc: "Select"},
+				{Key: "Tab", Desc: "Focus URL"},
+			}
 		}
 	case TabTelemetry:
 		switch m.centerMode {
@@ -370,7 +390,13 @@ func (m Model) renderTabbedView() string {
 			centerBody = m.verboseViewport.View()
 		case CenterViewTelemetry:
 			var spinStr string
-			if time.Since(m.lastTelemetry) < 2*time.Second {
+			if m.reducedMotion {
+				if m.hasActiveWork() {
+					spinStr = "[Active] "
+				} else {
+					spinStr = "[Idle]   "
+				}
+			} else if m.hasActiveWork() {
 				spinStr = m.spinner.View() + " "
 			} else {
 				spinStr = "    "

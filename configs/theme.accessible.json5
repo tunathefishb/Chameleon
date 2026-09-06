@@ -1,0 +1,31 @@
+// Chameleon TUI Accessible / High-Contrast Theme Configuration (JSON5)
+// High-contrast theme utilizing standard 16 ANSI colors for maximum visibility and screen-reader compatibility.
+// Place this file at ~/.config/chameleon/theme.json5 or pass via theme loader.
+{
+  // Panel & Border Styling
+  border_active: "15",         // Bright White (maximum contrast)
+  border_inactive: "7",        // Standard Light Gray
+  title_active: "15",          // Bright White
+  title_inactive: "7",         // Standard Light Gray
+
+  // Accent & Highlight
+  accent_color: "14",          // Bright Cyan
+
+  // Telemetry Table Styling
+  table_header_border: "7",
+  table_selected_fg: "0",      // Black
+  table_selected_bg: "15",     // Bright White (inverted high-contrast selection)
+
+  // Footer Navigation Bar
+  footer_key: "14",            // Bright Cyan
+  footer_desc: "15",           // Bright White
+  footer_sep: "7",             // Standard Light Gray
+
+  // Job Queue Status Badges
+  status_running: "14",        // Bright Cyan
+  status_paused: "11",         // Bright Yellow
+  status_stopped: "208",       // Vibrant Orange (distinct from Red Error)
+  status_done: "10",           // Bright Green
+  status_error: "9",           // Bright Red
+  status_queued: "7",          // Standard Light Gray
+}

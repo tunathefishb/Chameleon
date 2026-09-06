@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"chameleon/internal/engine"
 
@@ -185,11 +184,18 @@ func (m Model) contextFooterItems() (string, []footerItem, []footerItem) {
 
 	case PanelQueue:
 		modeBadge = "JOBS QUEUE"
-		contextActions = []footerItem{
-			{Key: "Space", Desc: "Pause/Resume"},
-			{Key: "P", Desc: "Pause All"},
-			{Key: "s", Desc: "Stop"},
-			{Key: "↑/↓", Desc: "Select"},
+		if m.confirmStopURL != "" {
+			contextActions = []footerItem{
+				{Key: "s", Desc: "Confirm Stop"},
+				{Key: "Esc", Desc: "Cancel"},
+			}
+		} else {
+			contextActions = []footerItem{
+				{Key: "Space", Desc: "Pause/Resume"},
+				{Key: "P", Desc: "Pause All"},
+				{Key: "s", Desc: "Stop"},
+				{Key: "↑/↓", Desc: "Select"},
+			}
 		}
 		globalActions = []footerItem{
 			{Key: "Tab", Desc: "Next Panel"},
@@ -366,7 +372,13 @@ func (m Model) View() string {
 		centerBody = m.verboseViewport.View()
 	case CenterViewTelemetry:
 		var spinStr string
-		if time.Since(m.lastTelemetry) < 2*time.Second {
+		if m.reducedMotion {
+			if m.hasActiveWork() {
+				spinStr = "[Active] "
+			} else {
+				spinStr = "[Idle]   "
+			}
+		} else if m.hasActiveWork() {
 			spinStr = m.spinner.View() + " "
 		} else {
 			spinStr = "    "
@@ -388,7 +400,13 @@ func (m Model) View() string {
 		Bold(m.activePanel == PanelInput).
 		Foreground(lipgloss.Color(m.theme.AccentColor))
 	inputPrompt := inputPromptStyle.Render(" ❯ ") + m.textInput.View()
-	inputInner := lipgloss.JoinVertical(lipgloss.Left, "", inputPrompt)
+	var inputInner string
+	if m.inputError != "" {
+		errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.StatusError)).Bold(true)
+		inputInner = lipgloss.JoinVertical(lipgloss.Left, "", inputPrompt, " "+errStyle.Render(m.inputError))
+	} else {
+		inputInner = lipgloss.JoinVertical(lipgloss.Left, "", inputPrompt)
+	}
 	inputBox := m.renderPanel(PanelInput, " Target URL ", "", inputInner, l.BottomLeftWidth, l.BottomHeight)
 
 	// 5. Settings Box

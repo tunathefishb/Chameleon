@@ -1,14 +1,13 @@
 package tui
 
 import (
+	"net/url"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
 
 func (m *Model) updateTabbedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	var cmd tea.Cmd
-
 	switch msg.String() {
 	case "f1":
 		m.showHelp = true
@@ -16,7 +15,7 @@ func (m *Model) updateTabbedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// Focus switching between active tab and bottom URL bar
-	if msg.String() == "tab" {
+	if msg.String() == "tab" || msg.String() == "shift+tab" {
 		if m.focusTarget == FocusTabContent {
 			m.setFocusTarget(FocusURLInput)
 		} else {
@@ -35,11 +34,21 @@ func (m *Model) updateTabbedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+a", "f2":
 			val := strings.TrimSpace(m.textInput.Value())
 			if val != "" {
-				m.startAnalysis(val)
+				normalized := val
+				if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+					normalized = "https://" + normalized
+				}
+				parsed, err := url.Parse(normalized)
+				if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") || (!strings.Contains(parsed.Host, ".") && parsed.Host != "localhost") {
+					m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
+					return *m, nil
+				}
+				m.inputError = ""
+				cmd := m.startAnalysis(val)
 				m.activeTab = TabTelemetry
 				m.centerMode = CenterViewReport
 				m.setFocusTarget(FocusTabContent)
-				return *m, nil
+				return *m, cmd
 			}
 		}
 
@@ -96,8 +105,7 @@ func (m *Model) updateTabbedKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.updateTable(msg)
 
 	case TabFiles:
-		m.filesViewport, cmd = m.filesViewport.Update(msg)
-		return *m, cmd
+		return m.updateFilesKey(msg)
 
 	case TabSettings:
 		return m.updateSettings(msg)

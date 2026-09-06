@@ -19,12 +19,12 @@
   // Footer Navigation Bar
   footer_key: "39",
   footer_desc: "244",
-  footer_sep: "238",
+  footer_sep: "246",           // Light Gray (>= 4.5:1 contrast vs #000000)
 
   // Job Queue Status Badges
   status_running: "39",        // Cyan
   status_paused: "220",        // Yellow
-  status_stopped: "196",       // Red
+  status_stopped: "208",       // Orange (distinct from Error for colorblind accessibility)
   status_done: "46",           // Green
   status_error: "196",         // Red
   status_queued: "244",        // Dim Gray

@@ -204,6 +204,9 @@ func TestTabbedViewRendering(t *testing.T) {
 	if !strings.Contains(lines[0], "1: Queue") {
 		t.Fatalf("expected first line to contain '1: Queue', got %q", lines[0])
 	}
+	if !strings.HasPrefix(lines[0], " ") {
+		t.Fatalf("expected first line to have leading space padding for panel border alignment, got %q", lines[0])
+	}
 	if !strings.Contains(lines[1], "┌") {
 		t.Fatalf("expected second line directly beneath tabs to be panel top border, got %q", lines[1])
 	}
@@ -285,5 +288,59 @@ func TestTabbedInteractions(t *testing.T) {
 	}
 	if m.textInput.Value() != "" {
 		t.Fatalf("expected textInput to be cleared after Enter")
+	}
+}
+
+func TestTabbedShiftTabFocusToggle(t *testing.T) {
+	eng := engine.NewEngine()
+	m := InitialModel(eng)
+
+	m.uiMode = UIModeTabbed
+	m.setFocusTarget(FocusURLInput)
+
+	// Shift+Tab toggles focus to TabContent
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(Model)
+	if m.focusTarget != FocusTabContent {
+		t.Fatalf("expected Shift+Tab to focus TabContent, got %d", m.focusTarget)
+	}
+
+	// Shift+Tab toggles focus back to URLInput
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	m = next.(Model)
+	if m.focusTarget != FocusURLInput {
+		t.Fatalf("expected Shift+Tab to focus URLInput, got %d", m.focusTarget)
+	}
+}
+
+func TestTabbedQueueSelectionAndCursor(t *testing.T) {
+	eng := engine.NewEngine()
+	m := InitialModel(eng)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m = next.(Model)
+
+	m.addQueue("https://example.com/one")
+	m.addQueue("https://example.com/two")
+	m.setFocusTarget(FocusTabContent)
+	m.focusTab(TabQueue)
+
+	m.updateQueueContent()
+	content := m.queueViewport.View()
+
+	// In Tabbed mode with TabQueue focused, the selected item must display the cursor '▶'
+	if !strings.Contains(content, "▶") {
+		t.Fatalf("expected queue viewport content to contain '▶' cursor in Tabbed mode, got:\n%s", content)
+	}
+
+	// Move cursor down
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	m = next.(Model)
+	if m.queueCursor != 1 {
+		t.Fatalf("expected queueCursor 1, got %d", m.queueCursor)
+	}
+	content = m.queueViewport.View()
+	lines := strings.Split(strings.TrimSpace(content), "\n")
+	if len(lines) >= 2 && !strings.Contains(lines[1], "▶") {
+		t.Fatalf("expected second line to have '▶' cursor after moving down, got:\n%s", content)
 	}
 }
