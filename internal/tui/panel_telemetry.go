@@ -42,10 +42,19 @@ func (m *Model) updateVerboseContent(res engine.Result) {
 	writeField("Method:     ", valueStyle.Render(method))
 
 	var statusBadge string
+	errColor := m.theme.Error
+	if errColor == "" {
+		errColor = m.theme.StatusError
+	}
+	successColor := m.theme.Success
+	if successColor == "" {
+		successColor = m.theme.StatusDone
+	}
+
 	if res.Status == "ERR" || res.StatusCode >= 400 {
-		statusBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render(res.Status)
+		statusBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(errColor)).Render(res.Status)
 	} else {
-		statusBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("46")).Render(res.Status)
+		statusBadge = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(successColor)).Render(res.Status)
 	}
 	writeField("Status:     ", statusBadge)
 	writeField("Content:    ", valueStyle.Render(res.Type))
@@ -57,7 +66,7 @@ func (m *Model) updateVerboseContent(res engine.Result) {
 
 	if res.ErrorMsg != "" {
 		b.WriteString("\n  ")
-		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("196")).Render("─ Error Details ─────────────────────────────────────────"))
+		b.WriteString(lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(errColor)).Render("─ Error Details ─────────────────────────────────────────"))
 		b.WriteString("\n   ")
 		b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("203")).Render(res.ErrorMsg))
 		b.WriteByte('\n')

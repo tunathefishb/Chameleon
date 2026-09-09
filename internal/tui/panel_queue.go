@@ -13,7 +13,6 @@ import (
 func (m *Model) addQueue(url string) {
 	m.queue = append(m.queue, url)
 	m.needsQueueUpdate = true
-	m.updateQueueContent()
 }
 
 func (m *Model) updateQueueContent() {
@@ -78,8 +77,8 @@ func (m *Model) updateQueueContent() {
 		// Truncate URL to fit in queue viewport
 		maxURLLen := m.queueViewport.Width - 18
 		displayURL := q
-		if maxURLLen > 8 && len(displayURL) > maxURLLen {
-			displayURL = displayURL[:maxURLLen-3] + "..."
+		if maxURLLen > 8 {
+			displayURL = truncateRunes(q, maxURLLen)
 		}
 
 		line := fmt.Sprintf("%s%2d. %s %s\n", prefix, i+1, statusBadge, urlStyle.Render(displayURL))
@@ -99,10 +98,7 @@ func (m *Model) updateQueueContent() {
 }
 
 func (m Model) isQueueFocused() bool {
-	if m.uiMode == UIModeTabbed {
-		return m.activeTab == TabQueue && m.focusTarget == FocusTabContent
-	}
-	return m.activePanel == PanelQueue
+	return m.activeTab == TabQueue && m.focusTarget == FocusTabContent
 }
 
 func (m *Model) updateQueueKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {

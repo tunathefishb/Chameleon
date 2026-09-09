@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -89,9 +90,12 @@ func parseSavedFile(rawPath string) SavedFileEntry {
 	}
 }
 
-func formatBytes(b int64) string {
+func formatBytesGeneric(b int64, compact bool) string {
 	const unit = 1024
 	if b < unit {
+		if compact {
+			return fmt.Sprintf("%dB", b)
+		}
 		return fmt.Sprintf("%d B", b)
 	}
 	div, exp := int64(unit), 0
@@ -100,39 +104,24 @@ func formatBytes(b int64) string {
 		exp++
 	}
 	val := float64(b) / float64(div)
-	switch exp {
-	case 0:
-		return fmt.Sprintf("%.1f KB", val)
-	case 1:
-		return fmt.Sprintf("%.1f MB", val)
-	case 2:
-		return fmt.Sprintf("%.1f GB", val)
-	default:
-		return fmt.Sprintf("%.1f TB", val)
+	units := []string{"KB", "MB", "GB", "TB"}
+	compactUnits := []string{"K", "M", "G", "T"}
+	idx := exp
+	if idx >= len(units) {
+		idx = len(units) - 1
 	}
+	if compact {
+		return fmt.Sprintf("%.1f%s", val, compactUnits[idx])
+	}
+	return fmt.Sprintf("%.1f %s", val, units[idx])
+}
+
+func formatBytes(b int64) string {
+	return formatBytesGeneric(b, false)
 }
 
 func formatBytesCompact(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%dB", b)
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	val := float64(b) / float64(div)
-	switch exp {
-	case 0:
-		return fmt.Sprintf("%.1fK", val)
-	case 1:
-		return fmt.Sprintf("%.1fM", val)
-	case 2:
-		return fmt.Sprintf("%.1fG", val)
-	default:
-		return fmt.Sprintf("%.1fT", val)
-	}
+	return formatBytesGeneric(b, true)
 }
 
 func padRight(s string, width int) string {
@@ -159,28 +148,43 @@ func truncateRunes(s string, maxLen int) string {
 		return s
 	}
 	if maxLen <= 3 {
-		return string([]rune(s)[:maxLen])
+		var b strings.Builder
+		for _, r := range s {
+			if lipgloss.Width(b.String()+string(r)) > maxLen {
+				break
+			}
+			b.WriteRune(r)
+		}
+		return b.String()
 	}
-	runes := []rune(s)
-	if len(runes) > maxLen-3 {
-		return string(runes[:maxLen-3]) + "..."
+
+	var b strings.Builder
+	for _, r := range s {
+		if lipgloss.Width(b.String()+string(r)+"...") > maxLen {
+			break
+		}
+		b.WriteRune(r)
 	}
-	return s
+	res := b.String()
+	for len(res) > 0 {
+		r, size := utf8.DecodeLastRuneInString(res)
+		if r == '\u200D' || (r >= '\uFE00' && r <= '\uFE0F') {
+			res = res[:len(res)-size]
+		} else {
+			break
+		}
+	}
+	return res + "..."
 }
 
 func (m *Model) addFile(path string) {
-	m.files = append(m.files, path)
 	entry := parseSavedFile(path)
 	m.savedFiles = append(m.savedFiles, entry)
-	m.totalSavedSize += entry.Size
 	m.needsFilesUpdate = true
 }
 
 func (m Model) isFilesFocused() bool {
-	if m.uiMode == UIModeTabbed {
-		return m.activeTab == TabFiles && m.focusTarget == FocusTabContent
-	}
-	return m.activePanel == PanelFiles
+	return m.activeTab == TabFiles && m.focusTarget == FocusTabContent
 }
 
 func (m *Model) updateFilesKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -401,7 +405,7 @@ func (m *Model) updateFilesContent() {
 			b.WriteString(rowLine + "\n")
 		}
 	} else {
-		// Narrow mode (Grid mode / small viewports)
+		// Narrow mode (compact viewports)
 		headerOffset = 2
 		cardBorder := lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.TableHeaderBorder))
 		headerStyle := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(m.theme.AccentColor))

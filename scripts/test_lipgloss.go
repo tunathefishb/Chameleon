@@ -17,25 +17,32 @@ func main() {
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 25})
 	m = next.(tui.Model)
 
-	// Focus Settings
-	// Cycle: Input (0) -> Queue (1) -> Table (2) -> Files (3) -> Settings (4)
-	for range 4 {
-		next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
-		m = next.(tui.Model)
-	}
+	// Toggle focus from URL input to Tab Content
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(tui.Model)
 
-	fmt.Println("=== SETTINGS FOCUSED ===")
+	// Navigate to Settings (Tab 4)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
+	m = next.(tui.Model)
+
+	fmt.Println("=== SETTINGS TAB ===")
 	fmt.Println(m.View())
 
-	// Shift+Tab back to Files (3)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	// Cycle back to Files (Tab 3) via '['
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'['}})
 	m = next.(tui.Model)
-	fmt.Println("=== FILES FOCUSED ===")
+	fmt.Println("=== FILES TAB ===")
 	fmt.Println(m.View())
 
-	// Shift+Tab back to Telemetry (2)
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyShiftTab})
+	// Jump directly to Telemetry (Tab 2)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	m = next.(tui.Model)
-	fmt.Println("=== TELEMETRY FOCUSED ===")
+	fmt.Println("=== TELEMETRY TAB ===")
+	fmt.Println(m.View())
+
+	// Focus bottom URL bar via Tab
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	m = next.(tui.Model)
+	fmt.Println("=== URL BAR FOCUSED ===")
 	fmt.Println(m.View())
 }

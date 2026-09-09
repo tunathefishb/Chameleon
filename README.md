@@ -6,7 +6,7 @@ Designed for ease of use directly from your terminal, it leverages [Bubbletea](h
 
 ## Features
 
-- **Rich Terminal UI**: A beautiful, split-pane dashboard powered by Bubbletea and Lipgloss, featuring real-time updates.
+- **Rich Terminal UI**: A beautiful, tabbed terminal dashboard powered by Bubbletea and Lipgloss, featuring real-time updates.
 - **Scrapability & Ethical Audit**: Instant diagnostics evaluating robots.txt, sitemaps, WAF/Cloudflare bot defenses, Single Page App (SPA) dependencies, CSS obfuscation, honeypots, and passive rate limits with actionable recommendations.
 - **Concurrent Engine**: Scrape pages asynchronously using multiple worker goroutines.
 - **Live Telemetry**: Watch HTTP status codes, response sizes, content types, and response times update live in a data table.
@@ -38,20 +38,31 @@ make run
 
 Once launched, you will be presented with the Chameleon dashboard:
 
-- **Switch Focus (`Tab` / `Shift+Tab`)**: Cycle focus between all panels. The active panel is highlighted with a thick vibrant border.
-- **Input Panel**: Type the target URL:
-  - Press `Enter` to queue and scrape.
+- **Switch Focus (`Tab` / `Shift+Tab`)**: Toggle focus between the active tab content and the bottom target URL bar.
+- **Tab Navigation (`1`-`4` or `[` / `]`)**:
+  - `1`: **Queue** (view and manage crawl jobs)
+  - `2`: **Telemetry** (live request telemetry & scrapability report card)
+  - `3`: **Files** (saved files explorer with storage metrics)
+  - `4`: **Settings** (crawl depth, image scraping, safe/fast rate limit)
+- **Target URL Bar (Bottom)**:
+  - Type the target URL and press `Enter` to queue and scrape.
   - Press `Ctrl+A` (or `F2`) to trigger a **Scrapability & Ethical Audit**.
-- **Center Panel (Telemetry / Report Card)**:
-  - Press `Ctrl+A` or `A` to toggle between the **Live Telemetry Table** and the **Scrapability & Ethical Report Card**.
-- **Queue Panel (Left)**: 
-  - Scroll through pending/discovered URLs with `↑` / `↓` / `PgUp` / `PgDn` / `j` / `k`.
+  - Press `Esc` or `Tab` to return focus to the active tab.
+- **Queue Tab (`1`)**: 
+  - Scroll through pending/discovered URLs with `↑` / `↓` / `j` / `k`.
   - Press `Space` / `p` / `Enter` to pause or resume the selected job.
   - Press `P` (`Shift+P`) to pause or resume all jobs in the queue.
-  - Press `s` / `d` / `Del` to stop the selected job.
-- **Files Panel (Right)**: Scroll through saved file paths with `↑` / `↓` / `PgUp` / `PgDn` / `j` / `k`.
-- **Settings Panel (Bottom Right)**: Use `↑` / `↓` to select Depth, Images, or Speed, and `←` / `→` / `Space` / `Enter` to configure or toggle.
-- **Quit**: Press `Ctrl+C` to exit gracefully.
+  - Press `s` / `d` / `Del` to prompt stop confirmation (`[Confirm Stop? 's']`), then `s` to confirm or `Esc` to cancel.
+- **Telemetry Tab (`2`)**:
+  - Press `Enter`, `i`, or `v` to inspect verbose request headers and response details.
+  - Press `Ctrl+A` or `a` to view the **Scrapability & Ethical Report Card**.
+- **Files Tab (`3`)**:
+  - Scroll through saved files with `↑` / `↓` / `j` / `k`, `Home` / `g`, `End` / `G`.
+- **Settings Tab (`4`)**:
+  - Use `↑` / `↓` to select Depth, Images, or Speed, and `←` / `→` / `Space` / `Enter` to configure or toggle.
+- **Help & Quit**:
+  - Press `?` or `F1` to open the modal help overlay.
+  - Press `Ctrl+C` to exit gracefully.
 
 ## Project Structure
 

@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"errors"
+	"net"
 	"net/url"
 	"strings"
 	"time"
@@ -11,6 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -18,20 +21,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+c":
+		if msg.String() == "ctrl+c" {
 			return m, tea.Quit
-		case "ctrl+t", "f3":
-			m.manualUIMode = true
-			if m.uiMode == UIModeGrid {
-				m.uiMode = UIModeTabbed
-				m.setFocusTarget(FocusURLInput)
-			} else {
-				m.uiMode = UIModeGrid
-				m.focusPanel(PanelInput)
-			}
-			m.syncDimensions()
-			return m, nil
 		}
 
 		if m.showHelp {
@@ -42,71 +33,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if m.uiMode == UIModeTabbed {
-			return m.updateTabbedKey(msg)
-		}
-
-		switch msg.String() {
-		case "f1":
-			m.showHelp = true
-			return m, nil
-		case "?":
-			if m.activePanel != PanelInput {
-				m.showHelp = true
-				return m, nil
-			}
-		case "tab":
-			m.nextPanel()
-			return m, nil
-		case "shift+tab":
-			m.prevPanel()
-			return m, nil
-		case "ctrl+a", "f2":
-			if m.activePanel == PanelInput {
-				val := strings.TrimSpace(m.textInput.Value())
-				if val != "" {
-					normalized := val
-					if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
-						normalized = "https://" + normalized
-					}
-					parsed, err := url.Parse(normalized)
-					if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") || (!strings.Contains(parsed.Host, ".") && parsed.Host != "localhost") {
-						m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
-						return m, nil
-					}
-					m.inputError = ""
-					cmd := m.startAnalysis(val)
-					if cmd != nil {
-						cmds = append(cmds, cmd)
-					}
-					return m, tea.Batch(cmds...)
-				}
-			}
-			// Toggle center view mode
-			if m.centerMode == CenterViewTelemetry {
-				m.centerMode = CenterViewReport
-			} else {
-				m.centerMode = CenterViewTelemetry
-			}
-			return m, nil
-		}
-
-		switch m.activePanel {
-		case PanelInput:
-			return m.updateInput(msg)
-
-		case PanelQueue:
-			return m.updateQueueKey(msg)
-
-		case PanelTable:
-			return m.updateTable(msg)
-
-		case PanelFiles:
-			return m.updateFilesKey(msg)
-
-		case PanelSettings:
-			return m.updateSettings(msg)
-		}
+		return m.updateKey(msg)
 
 	case engineResultMsg:
 		m.totalTelemetry++
@@ -172,17 +99,113 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		if !m.manualUIMode {
-			if m.width < 120 || m.height < 28 {
-				m.uiMode = UIModeTabbed
-			} else {
-				m.uiMode = UIModeGrid
-			}
-		}
 		m.syncDimensions()
 	}
 
 	return m, tea.Batch(cmds...)
+}
+
+func (m *Model) updateKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "f1":
+		m.showHelp = true
+		return *m, nil
+	}
+
+	// Focus switching between active tab and bottom URL bar
+	if msg.String() == "tab" || msg.String() == "shift+tab" {
+		if m.focusTarget == FocusTabContent {
+			m.setFocusTarget(FocusURLInput)
+		} else {
+			m.setFocusTarget(FocusTabContent)
+		}
+		return *m, nil
+	}
+
+	// When URL input is focused
+	if m.focusTarget == FocusURLInput {
+		switch msg.String() {
+		case "esc":
+			m.setFocusTarget(FocusTabContent)
+			return *m, nil
+
+		case "ctrl+a", "f2":
+			val := strings.TrimSpace(m.textInput.Value())
+			if val != "" {
+				normalized, _, err := normalizeAndValidateURL(val)
+				if err != nil {
+					m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
+					return *m, nil
+				}
+				m.inputError = ""
+				cmd := m.startAnalysis(normalized)
+				m.activeTab = TabTelemetry
+				m.centerMode = CenterViewReport
+				m.setFocusTarget(FocusTabContent)
+				return *m, cmd
+			}
+		}
+
+		return m.updateInput(msg)
+	}
+
+	// When active tab content is focused
+	switch msg.String() {
+	case "?":
+		m.showHelp = true
+		return *m, nil
+
+	case "1":
+		m.focusTab(TabQueue)
+		return *m, nil
+
+	case "2":
+		m.focusTab(TabTelemetry)
+		return *m, nil
+
+	case "3":
+		m.focusTab(TabFiles)
+		return *m, nil
+
+	case "4":
+		m.focusTab(TabSettings)
+		return *m, nil
+
+	case "[":
+		m.prevTab()
+		return *m, nil
+
+	case "]":
+		m.nextTab()
+		return *m, nil
+
+	case "ctrl+a", "f2":
+		if m.activeTab == TabTelemetry {
+			if m.centerMode == CenterViewTelemetry {
+				m.centerMode = CenterViewReport
+			} else {
+				m.centerMode = CenterViewTelemetry
+			}
+			return *m, nil
+		}
+	}
+
+	// Delegate to active tab component
+	switch m.activeTab {
+	case TabQueue:
+		return m.updateQueueKey(msg)
+
+	case TabTelemetry:
+		return m.updateTable(msg)
+
+	case TabFiles:
+		return m.updateFilesKey(msg)
+
+	case TabSettings:
+		return m.updateSettings(msg)
+	}
+
+	return *m, nil
 }
 
 func (m *Model) syncDimensions() {
@@ -191,55 +214,30 @@ func (m *Model) syncDimensions() {
 	}
 	m.layout = calculateLayout(m.width, m.height)
 
-	if m.uiMode == UIModeTabbed {
-		contentW := m.layout.TabContentWidth
-		contentH := m.layout.TabContentHeight
+	contentW := m.layout.TabContentWidth
+	contentH := m.layout.TabContentHeight
 
-		m.queueViewport.Width = contentW - 2
-		m.queueViewport.Height = contentH - 3
+	m.queueViewport.Width = contentW - 2
+	m.queueViewport.Height = contentH - 3
 
-		m.filesViewport.Width = contentW - 2
-		m.filesViewport.Height = contentH - 3
+	m.filesViewport.Width = contentW - 2
+	m.filesViewport.Height = contentH - 3
 
-		m.reportViewport.Width = contentW - 2
-		m.reportViewport.Height = contentH - 3
+	m.reportViewport.Width = contentW - 2
+	m.reportViewport.Height = contentH - 3
 
-		m.verboseViewport.Width = contentW - 2
-		m.verboseViewport.Height = contentH - 3
+	m.verboseViewport.Width = contentW - 2
+	m.verboseViewport.Height = contentH - 3
 
-		tableWidth := contentW - 4
-		if tableWidth < 20 {
-			tableWidth = 20
-		}
-		m.table.SetWidth(tableWidth)
-		m.table.SetHeight(contentH - 3)
-
-		m.updateTableColumns(tableWidth)
-		m.textInput.Width = m.layout.Width - 6
-	} else {
-		// Grid mode
-		m.queueViewport.Width = m.layout.LeftWidth - 2
-		m.queueViewport.Height = m.layout.TopHeight - 3
-
-		m.filesViewport.Width = m.layout.RightWidth - 2
-		m.filesViewport.Height = m.layout.TopHeight - 3
-
-		tableWidth := m.layout.CenterWidth - 4
-		if tableWidth < 20 {
-			tableWidth = 20
-		}
-		m.table.SetWidth(tableWidth)
-		m.table.SetHeight(m.layout.TopHeight - 3)
-
-		m.reportViewport.Width = m.layout.CenterWidth - 2
-		m.reportViewport.Height = m.layout.TopHeight - 3
-
-		m.verboseViewport.Width = m.layout.CenterWidth - 2
-		m.verboseViewport.Height = m.layout.TopHeight - 3
-
-		m.updateTableColumns(tableWidth)
-		m.textInput.Width = m.layout.BottomLeftWidth - 8
+	tableWidth := contentW - 4
+	if tableWidth < 20 {
+		tableWidth = 20
 	}
+	m.table.SetWidth(tableWidth)
+	m.table.SetHeight(contentH - 3)
+
+	m.updateTableColumns(tableWidth)
+	m.textInput.Width = m.layout.Width - 6
 
 	m.updateFilesContent()
 	m.updateQueueContent()
@@ -269,16 +267,65 @@ func (m *Model) updateTableColumns(tableWidth int) {
 	})
 }
 
+var nonHTTPSchemes = map[string]bool{
+	"mailto":     true,
+	"ftp":        true,
+	"javascript": true,
+	"file":       true,
+	"data":       true,
+	"tel":        true,
+	"vbscript":   true,
+	"ws":         true,
+	"wss":        true,
+	"ssh":        true,
+	"git":        true,
+	"about":      true,
+	"blob":       true,
+	"irc":        true,
+	"news":       true,
+	"gopher":     true,
+	"ldap":       true,
+}
+
+func normalizeAndValidateURL(raw string) (string, *url.URL, error) {
+	val := strings.TrimSpace(raw)
+	if val == "" {
+		return "", nil, errors.New("empty URL")
+	}
+	if !strings.HasPrefix(val, "http://") && !strings.HasPrefix(val, "https://") {
+		if colonIdx := strings.Index(val, ":"); colonIdx != -1 {
+			if !strings.HasPrefix(val, "[") {
+				scheme := strings.ToLower(val[:colonIdx])
+				if strings.HasPrefix(val[colonIdx:], "://") || nonHTTPSchemes[scheme] {
+					return "", nil, errors.New("invalid URL structure")
+				}
+			}
+		}
+	}
+	normalized := val
+	if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
+		normalized = "https://" + normalized
+	}
+	parsed, err := url.Parse(normalized)
+	if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") {
+		return "", nil, errors.New("invalid URL structure")
+	}
+	hostname := parsed.Hostname()
+	if hostname == "" {
+		hostname = parsed.Host
+	}
+	if !strings.Contains(hostname, ".") && hostname != "localhost" && net.ParseIP(hostname) == nil {
+		return "", nil, errors.New("invalid URL structure")
+	}
+	return normalized, parsed, nil
+}
+
 func (m *Model) updateInput(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "enter" {
 		val := strings.TrimSpace(m.textInput.Value())
 		if val != "" {
-			normalized := val
-			if !strings.HasPrefix(normalized, "http://") && !strings.HasPrefix(normalized, "https://") {
-				normalized = "https://" + normalized
-			}
-			parsed, err := url.Parse(normalized)
-			if err != nil || parsed.Host == "" || strings.ContainsAny(parsed.Host, " \t\r\n") || (!strings.Contains(parsed.Host, ".") && parsed.Host != "localhost") {
+			normalized, _, err := normalizeAndValidateURL(val)
+			if err != nil {
 				m.inputError = "⚠️ Please enter a valid URL (e.g. example.com)"
 				return *m, nil
 			}
@@ -333,7 +380,6 @@ func (m *Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			cursor := m.table.Cursor()
 			if len(m.telemetryItems) > 0 && cursor >= 0 && cursor < len(m.telemetryItems) {
 				selected := m.telemetryItems[cursor]
-				m.selectedItem = &selected
 				m.updateVerboseContent(selected)
 				m.centerMode = CenterViewVerbose
 				return *m, nil
@@ -349,45 +395,73 @@ func (m *Model) updateTable(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *Model) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
+
 	switch msg.String() {
 	case "up", "k":
-		m.settingIndex = (m.settingIndex - 1 + 3) % 3
+		m.settingIndex = (m.settingIndex - 1 + 16) % 16
 	case "down", "j":
-		m.settingIndex = (m.settingIndex + 1) % 3
-	case "left":
-		switch m.settingIndex {
-		case 0:
-			if m.settings.Depth > 1 {
-				m.settings.Depth--
-			}
-		case 1:
-			m.settings.Images = !m.settings.Images
-		case 2:
-			if m.settings.Speed == engine.SpeedFast {
-				m.settings.Speed = engine.SpeedSafe
-			} else {
-				m.settings.Speed = engine.SpeedFast
-			}
-		}
-	case "right", "enter", " ":
-		switch m.settingIndex {
-		case 0:
-			if msg.String() == "right" {
-				if m.settings.Depth < 5 {
-					m.settings.Depth++
-				}
-			} else {
-				m.settings.Depth = (m.settings.Depth % 5) + 1
-			}
-		case 1:
-			m.settings.Images = !m.settings.Images
-		case 2:
-			if m.settings.Speed == engine.SpeedSafe {
-				m.settings.Speed = engine.SpeedFast
-			} else {
-				m.settings.Speed = engine.SpeedSafe
-			}
-		}
+		m.settingIndex = (m.settingIndex + 1) % 16
+	case "pgup", "b":
+		// Jump to previous category (4 items)
+		m.settingIndex = (m.settingIndex - 4 + 16) % 16
+	case "pgdown", "f":
+		// Jump to next category (4 items)
+		m.settingIndex = (m.settingIndex + 4) % 16
+	case "home", "g":
+		m.settingIndex = 0
+	case "end", "G":
+		m.settingIndex = 15
+	case "left", "h":
+		m.settingsState.Adjust(m.settingIndex, -1)
+		cmd = m.applySettingSideEffects()
+	case "right", "l", "enter", " ":
+		m.settingsState.Adjust(m.settingIndex, 1)
+		cmd = m.applySettingSideEffects()
 	}
-	return *m, nil
+
+	return *m, cmd
+}
+
+// applySettingSideEffects applies live modifications (theme, motion, engine settings).
+func (m *Model) applySettingSideEffects() tea.Cmd {
+	var cmd tea.Cmd
+
+	// 1. Sync engine settings (Depth, Images, Speed)
+	m.syncSettingsToEngine()
+
+	// 2. Live Theme Switching
+	switch m.settingsState.ThemeIndex {
+	case 0:
+		m.theme = DefaultTheme()
+	case 1:
+		m.theme = LightTheme()
+	case 2:
+		m.theme = AccessibleTheme()
+	}
+
+	// Update table styles to match new theme
+	s := table.DefaultStyles()
+	s.Header = s.Header.
+		BorderStyle(lipgloss.NormalBorder()).
+		BorderForeground(lipgloss.Color(m.theme.TableHeaderBorder)).
+		BorderBottom(true).
+		Bold(false)
+	s.Selected = s.Selected.
+		Foreground(lipgloss.Color(m.theme.TableSelectedFg)).
+		Background(lipgloss.Color(m.theme.TableSelectedBg)).
+		Bold(false)
+	m.table.SetStyles(s)
+	m.spinner.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(m.theme.AccentColor))
+
+	// 3. Live Motion Switching
+	m.reducedMotion = m.settingsState.ReducedMotion
+	if m.reducedMotion {
+		m.spinnerRunning = false
+	} else if m.hasActiveWork() && !m.spinnerRunning {
+		m.spinnerRunning = true
+		cmd = m.spinner.Tick
+	}
+
+	return cmd
 }

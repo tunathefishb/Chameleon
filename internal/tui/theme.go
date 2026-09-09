@@ -34,6 +34,10 @@ type Theme struct {
 	StatusDone    string `json:"status_done"`
 	StatusError   string `json:"status_error"`
 	StatusQueued  string `json:"status_queued"`
+
+	// Status theme tokens
+	Error   string `json:"error,omitempty"`
+	Success string `json:"success,omitempty"`
 }
 
 // DefaultTheme returns the default Chameleon theme colors.
@@ -56,6 +60,58 @@ func DefaultTheme() Theme {
 		StatusDone:        "46",
 		StatusError:       "196",
 		StatusQueued:      "244",
+		Error:             "196",
+		Success:           "46",
+	}
+}
+
+// AccessibleTheme returns the high-contrast 16-ANSI color theme.
+func AccessibleTheme() Theme {
+	return Theme{
+		BorderActive:      "15",
+		BorderInactive:    "7",
+		TitleActive:       "15",
+		TitleInactive:     "7",
+		TableHeaderBorder: "7",
+		TableSelectedFg:   "0",
+		TableSelectedBg:   "15",
+		AccentColor:       "14",
+		FooterKey:         "14",
+		FooterDesc:        "15",
+		FooterSep:         "7",
+		StatusRunning:     "14",
+		StatusPaused:      "11",
+		StatusStopped:     "208",
+		StatusDone:        "10",
+		StatusError:       "9",
+		StatusQueued:      "7",
+		Error:             "9",
+		Success:           "10",
+	}
+}
+
+// LightTheme returns the WCAG 2.1 AA compliant light background theme.
+func LightTheme() Theme {
+	return Theme{
+		BorderActive:      "24",
+		BorderInactive:    "244",
+		TitleActive:       "24",
+		TitleInactive:     "240",
+		TableHeaderBorder: "244",
+		TableSelectedFg:   "255",
+		TableSelectedBg:   "24",
+		AccentColor:       "24",
+		FooterKey:         "24",
+		FooterDesc:        "240",
+		FooterSep:         "244",
+		StatusRunning:     "24",
+		StatusPaused:      "130",
+		StatusStopped:     "166",
+		StatusDone:        "28",
+		StatusError:       "160",
+		StatusQueued:      "240",
+		Error:             "160",
+		Success:           "28",
 	}
 }
 
@@ -89,6 +145,19 @@ func LoadTheme(customPaths ...string) Theme {
 			_ = json5.Unmarshal(data, &theme)
 			break
 		}
+	}
+
+	if theme.Error == "" {
+		theme.Error = theme.StatusError
+	}
+	if theme.Success == "" {
+		theme.Success = theme.StatusDone
+	}
+	if theme.StatusError == "" {
+		theme.StatusError = theme.Error
+	}
+	if theme.StatusDone == "" {
+		theme.StatusDone = theme.Success
 	}
 
 	return theme

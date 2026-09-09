@@ -19,7 +19,7 @@ func TestURLInputValidationAccessibility(t *testing.T) {
 	m := InitialModel(eng)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	m = next.(Model)
-	m.focusPanel(PanelInput)
+	m.setFocusTarget(FocusURLInput)
 
 	// 1. Test invalid URL submission (spaces)
 	m.textInput.SetValue("not a valid url")
@@ -73,7 +73,8 @@ func TestQueueStopConfirmationSafeguard(t *testing.T) {
 	url2 := "https://example.com/two"
 	m.addQueue(url1)
 	m.addQueue(url2)
-	m.focusPanel(PanelQueue)
+	m.focusTab(TabQueue)
+	m.setFocusTarget(FocusTabContent)
 
 	// Move to url1
 	m.queueCursor = 0
@@ -167,6 +168,7 @@ func TestSpinnerIdleGatingAndReducedMotion(t *testing.T) {
 
 	// 4. Reduced Motion Mode
 	m.reducedMotion = true
+	m.focusTab(TabTelemetry)
 	m.centerMode = CenterViewTelemetry
 	if cmd := m.startSpinnerCmd(); cmd != nil {
 		t.Fatalf("expected nil cmd when reducedMotion is active")

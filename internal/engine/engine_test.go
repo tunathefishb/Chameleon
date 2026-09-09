@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -164,6 +165,7 @@ func TestEngineImageScrapingAndRewriting(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	_ = os.RemoveAll("output")
 	eng := NewEngine()
 	eng.Start(2)
 	defer func() {
@@ -197,7 +199,7 @@ func TestEngineImageScrapingAndRewriting(t *testing.T) {
 	// Verify the saved files exist
 	// Parse server host
 	parsedURL, _ := http.NewRequest(http.MethodGet, ts.URL, nil)
-	host := parsedURL.URL.Host
+	host := parsedURL.URL.Hostname()
 
 	htmlPath := filepath.Join("output", host, "index.html")
 	htmlBytes, err := os.ReadFile(htmlPath)
@@ -343,5 +345,275 @@ func TestEngineHasActiveWork(t *testing.T) {
 	eng.jobStates.Store("http://example.com/test", StatusDone)
 	if eng.HasActiveWork() {
 		t.Fatalf("expected HasActiveWork to be false when all jobs are done")
+	}
+}
+
+func TestResolveSavePathSecurity(t *testing.T) {
+	tests := []struct {
+		name        string
+		rawURL      string
+		isImage     bool
+		expectedRel string
+	}{
+		{
+			name:        "Standard URL",
+			rawURL:      "http://example.com/about/team.html",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "example.com", "about", "team.html"),
+		},
+		{
+			name:        "Host with standard port",
+			rawURL:      "http://example.com:8080/data.json",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "example.com", "data.json"),
+		},
+		{
+			name:        "IPv6 host with port",
+			rawURL:      "http://[::1]:8443/index",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "__1", "index"),
+		},
+		{
+			name:        "Empty path resolves to index.html",
+			rawURL:      "http://example.com",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "example.com", "index.html"),
+		},
+		{
+			name:        "Trailing slash resolves to index.html",
+			rawURL:      "http://example.com/docs/",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "example.com", "docs", "index.html"),
+		},
+		{
+			name:        "Empty path for image resolves to image",
+			rawURL:      "http://example.com/",
+			isImage:     true,
+			expectedRel: filepath.Join("output", "example.com", "image"),
+		},
+		{
+			name:        "Directory traversal attempt is neutralized",
+			rawURL:      "http://example.com/../../etc/passwd",
+			isImage:     false,
+			expectedRel: filepath.Join("output", "example.com", "etc", "passwd"),
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			u, err := url.Parse(tc.rawURL)
+			if err != nil {
+				t.Fatalf("failed to parse url %s: %v", tc.rawURL, err)
+			}
+			got := resolveSavePath(u, tc.isImage)
+			cleanExpected := filepath.Clean(tc.expectedRel)
+			cleanGot := filepath.Clean(got)
+			if cleanGot != cleanExpected {
+				t.Errorf("expected %q, got %q", cleanExpected, cleanGot)
+			}
+			// Verify it never equals output/<host> directly
+			baseHostDir := filepath.Clean(filepath.Join("output", sanitizeHost(u)))
+			if cleanGot == baseHostDir {
+				t.Errorf("path equals base directory output/<host>, should be nested inside: %q", cleanGot)
+			}
+		})
+	}
+}
+
+func TestSymlinkTraversalProtection(t *testing.T) {
+	tmpDir := t.TempDir()
+	origDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(origDir)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := os.MkdirAll("output/example.com", 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	outsideDir := filepath.Join(tmpDir, "outside")
+	if err := os.MkdirAll(outsideDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	secretFile := filepath.Join(outsideDir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("sensitive"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	symlinkPath := filepath.Join("output", "example.com", "linked.txt")
+	if err := os.Symlink(secretFile, symlinkPath); err != nil {
+		t.Skipf("symlinks not supported in environment: %v", err)
+	}
+
+	if isSafeOutputPath(symlinkPath) {
+		t.Errorf("expected isSafeOutputPath to reject symlink pointing outside output/")
+	}
+
+	safePath := filepath.Join("output", "example.com", "normal.txt")
+	if !isSafeOutputPath(safePath) {
+		t.Errorf("expected isSafeOutputPath to accept normal path inside output/")
+	}
+}
+
+func TestHTTPStatusErrorAndRetry(t *testing.T) {
+	statusCode := http.StatusNotFound
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "Not Found", statusCode)
+	}))
+	defer ts.Close()
+
+	eng := NewEngine()
+	eng.Start(1)
+	defer func() {
+		eng.Stop()
+		os.RemoveAll("output")
+	}()
+
+	settings := Settings{Depth: 1, Speed: SpeedFast}
+	eng.AddJob(ts.URL, settings)
+
+	select {
+	case res := <-eng.Results:
+		if res.StatusCode != 404 {
+			t.Errorf("expected status code 404, got %d", res.StatusCode)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for 404 result")
+	}
+
+	st := eng.GetJobStatus(ts.URL)
+	if st != StatusError {
+		t.Fatalf("expected job status StatusError for 404 response, got %s", st)
+	}
+
+	eng.AddJob(ts.URL, settings)
+	stAfterRetry := eng.GetJobStatus(ts.URL)
+	if stAfterRetry != StatusQueued && stAfterRetry != StatusRunning && stAfterRetry != StatusError {
+		t.Fatalf("expected job to be re-enqueued, got status %s", stAfterRetry)
+	}
+}
+
+func TestSendResultNonBlockingAndCleanShutdown(t *testing.T) {
+	eng := NewEngine()
+	for i := 0; i < 1005; i++ {
+		eng.sendResult(Result{
+			Name:       fmt.Sprintf("item-%d", i),
+			Status:     "200",
+			StatusCode: 200,
+		})
+	}
+
+	done := make(chan struct{})
+	go func() {
+		eng.Stop()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("eng.Stop() deadlocked or timed out during shutdown under channel backpressure")
+	}
+
+	eng.sendResult(Result{Name: "post-stop", Status: "200"})
+}
+
+func TestAllJobsEvictionOnStopJob(t *testing.T) {
+	eng := NewEngine()
+	targetURL := "https://example.com/leak-test"
+	settings := Settings{Depth: 1, Speed: SpeedSafe}
+
+	eng.AddJob(targetURL, settings)
+
+	eng.allJobsMu.Lock()
+	_, exists := eng.allJobs[targetURL]
+	eng.allJobsMu.Unlock()
+	if !exists {
+		t.Fatalf("expected job to be in allJobs after AddJob")
+	}
+
+	eng.StopJob(targetURL)
+
+	eng.allJobsMu.Lock()
+	_, stillExists := eng.allJobs[targetURL]
+	eng.allJobsMu.Unlock()
+	if stillExists {
+		t.Fatalf("job leaked in allJobs after StopJob")
+	}
+	if eng.GetJobStatus(targetURL) != StatusStopped {
+		t.Fatalf("expected status Stopped, got %s", eng.GetJobStatus(targetURL))
+	}
+}
+
+func TestRecursiveLinkDomainBoundingAndSSRF(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprintln(w, `<html><body>
+			<a href="/allowed-child">Internal Link</a>
+			<a href="https://external-domain.com/unauthorized">External Link</a>
+			<a href="http://169.254.169.254/latest/meta-data/">Cloud Metadata SSRF</a>
+		</body></html>`)
+	}))
+	defer ts.Close()
+
+	eng := NewEngine()
+	eng.Start(1)
+	defer func() {
+		eng.Stop()
+		os.RemoveAll("output")
+	}()
+
+	settings := Settings{
+		Depth:  2,
+		Images: false,
+		Speed:  SpeedFast,
+	}
+	eng.AddJob(ts.URL, settings)
+
+	discoveredURLs := make(map[string]bool)
+	timeout := time.After(2 * time.Second)
+loop:
+	for {
+		select {
+		case u := <-eng.Discovered:
+			discoveredURLs[u] = true
+		case <-time.After(200 * time.Millisecond):
+			break loop
+		case <-timeout:
+			break loop
+		}
+	}
+
+	if !discoveredURLs[ts.URL+"/allowed-child"] {
+		t.Errorf("expected same-host child link to be discovered, got %v", discoveredURLs)
+	}
+	if discoveredURLs["https://external-domain.com/unauthorized"] {
+		t.Errorf("external domain should not have been crawled (SSRF / domain boundary leak)")
+	}
+	if discoveredURLs["http://169.254.169.254/latest/meta-data/"] {
+		t.Errorf("cloud metadata IP should never have been crawled (SSRF hazard)")
+	}
+}
+
+func TestAnalyzeURLFallbackErrorReport(t *testing.T) {
+	eng := NewEngine()
+	defer eng.Stop()
+
+	eng.AnalyzeURL("http://invalid url with spaces")
+
+	select {
+	case report := <-eng.Analysis:
+		if report.EthicalGrade != "F" {
+			t.Errorf("expected EthicalGrade F, got %s", report.EthicalGrade)
+		}
+		if report.DifficultyLevel != "Extreme" {
+			t.Errorf("expected DifficultyLevel Extreme, got %s", report.DifficultyLevel)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for Analysis report fallback on error")
 	}
 }

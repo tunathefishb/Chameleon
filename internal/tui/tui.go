@@ -15,25 +15,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-type Panel int
-
-const (
-	PanelInput Panel = iota
-	PanelQueue
-	PanelTable
-	PanelFiles
-	PanelSettings
-)
-
-const totalPanels = 5
-
-type UIMode int
-
-const (
-	UIModeGrid UIMode = iota
-	UIModeTabbed
-)
-
 type ActiveTab int
 
 const (
@@ -65,12 +46,8 @@ type Model struct {
 	height int
 	layout Layout
 
-	uiMode       UIMode
-	manualUIMode bool
 	activeTab    ActiveTab
 	focusTarget  FocusArea
-
-	activePanel  Panel
 	centerMode   CenterViewMode
 	settingIndex int
 	queueCursor  int
@@ -83,14 +60,12 @@ type Model struct {
 	verboseViewport viewport.Model
 
 	settings         engine.Settings
+	settingsState    SettingsState
 	eng              *engine.Engine
 	queue            []string
-	files            []string
 	savedFiles       []SavedFileEntry
 	filesCursor      int
-	totalSavedSize   int64
 	telemetryItems   []engine.Result
-	selectedItem     *engine.Result
 	latestReport     *analyzer.Report
 	isAnalyzing      bool
 	analyzingURL     string
@@ -134,10 +109,6 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 		theme = themes[0]
 	}
 
-	uiMode := UIModeGrid
-	if os.Getenv("ACCESSIBILITY_ENABLED") == "1" {
-		uiMode = UIModeTabbed
-	}
 	reducedMotion := os.Getenv("REDUCED_MOTION") == "1" || os.Getenv("NO_ANIMATIONS") == "1"
 
 	ti := textinput.New()
@@ -193,11 +164,8 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 	sp.Style = lipgloss.NewStyle().Foreground(lipgloss.Color(theme.AccentColor))
 
 	return Model{
-		uiMode:          uiMode,
-		manualUIMode:    false,
 		activeTab:       TabQueue,
 		focusTarget:     FocusURLInput,
-		activePanel:     PanelInput,
 		centerMode:      CenterViewTelemetry,
 		settingIndex:    0,
 		queueCursor:     0,
@@ -212,12 +180,11 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 			Images: false,
 			Speed:  engine.SpeedSafe,
 		},
+		settingsState:  DefaultSettingsState(),
 		eng:            eng,
 		queue:          []string{},
-		files:          []string{},
 		savedFiles:     []SavedFileEntry{},
 		filesCursor:    0,
-		totalSavedSize: 0,
 		telemetryItems: []engine.Result{},
 		totalTelemetry: 0,
 		spinner:        sp,
@@ -226,6 +193,19 @@ func InitialModel(eng *engine.Engine, themes ...Theme) Model {
 		spinnerRunning: false,
 	}
 }
+
+func (m *Model) syncSettingsToEngine() {
+	if m.settingsState.DepthIndex >= 0 && m.settingsState.DepthIndex < len(DepthOptions) {
+		m.settings.Depth = DepthOptions[m.settingsState.DepthIndex]
+	}
+	m.settings.Images = m.settingsState.Images
+	if m.settingsState.SpeedIndex == 0 {
+		m.settings.Speed = engine.SpeedSafe
+	} else {
+		m.settings.Speed = engine.SpeedFast
+	}
+}
+
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
@@ -239,32 +219,6 @@ func (m Model) Init() tea.Cmd {
 		cmds = append(cmds, m.spinner.Tick)
 	}
 	return tea.Batch(cmds...)
-}
-
-func (m *Model) focusPanel(p Panel) {
-	m.activePanel = p
-	if p == PanelInput {
-		m.textInput.Focus()
-	} else {
-		m.textInput.Blur()
-	}
-
-	if p == PanelTable {
-		m.table.Focus()
-	} else {
-		m.table.Blur()
-	}
-
-	m.updateQueueContent()
-	m.updateFilesContent()
-}
-
-func (m *Model) nextPanel() {
-	m.focusPanel((m.activePanel + 1) % totalPanels)
-}
-
-func (m *Model) prevPanel() {
-	m.focusPanel((m.activePanel - 1 + totalPanels) % totalPanels)
 }
 
 func (m *Model) focusTab(t ActiveTab) {

@@ -7,6 +7,7 @@ import (
 	"chameleon/internal/engine"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestParseSavedFile(t *testing.T) {
@@ -94,7 +95,8 @@ func TestSavedFilesTableRenderingWide(t *testing.T) {
 	m.addFile("output/en.wikipedia.org/static/logo.png")
 	m.addFile("output/ja.wikipedia.org/index.html")
 
-	m.focusPanel(PanelFiles)
+	m.focusTab(TabFiles)
+	m.setFocusTarget(FocusTabContent)
 	m.updateFilesContent()
 
 	content := m.filesViewport.View()
@@ -131,7 +133,8 @@ func TestSavedFilesTableRenderingNarrow(t *testing.T) {
 	m.addFile("output/en.wikipedia.org/index.html")
 	m.addFile("output/en.wikipedia.org/static/logo.png")
 
-	m.focusPanel(PanelFiles)
+	m.focusTab(TabFiles)
+	m.setFocusTarget(FocusTabContent)
 	m.updateFilesContent()
 
 	content := m.filesViewport.View()
@@ -158,7 +161,8 @@ func TestSavedFilesCursorNavigation(t *testing.T) {
 	m.addFile("output/en.wikipedia.org/about.html")
 	m.addFile("output/en.wikipedia.org/static/logo.png")
 
-	m.focusPanel(PanelFiles)
+	m.focusTab(TabFiles)
+	m.setFocusTarget(FocusTabContent)
 
 	if m.filesCursor != 0 {
 		t.Fatalf("expected initial cursor 0, got %d", m.filesCursor)
@@ -231,15 +235,137 @@ func TestVisualPreview(t *testing.T) {
 	m = next.(Model)
 
 	preview := m.View()
-	t.Logf("\n=== TABBED MODE PREVIEW ===\n%s\n", preview)
-
-	// Switch to Grid Mode
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyCtrlT})
-	m = next.(Model)
-	next, _ = m.Update(tea.WindowSizeMsg{Width: 120, Height: 28})
-	m = next.(Model)
-
-	m.focusPanel(PanelFiles)
-	gridPreview := m.View()
-	t.Logf("\n=== GRID MODE PREVIEW ===\n%s\n", gridPreview)
+	t.Logf("\n=== FILES TAB PREVIEW ===\n%s\n", preview)
 }
+
+func TestTruncateRunes(t *testing.T) {
+	tests := []struct {
+		name   string
+		input  string
+		maxLen int
+		want   string
+	}{
+		{
+			name:   "empty string",
+			input:  "",
+			maxLen: 10,
+			want:   "",
+		},
+		{
+			name:   "negative maxLen",
+			input:  "hello",
+			maxLen: -1,
+			want:   "",
+		},
+		{
+			name:   "zero maxLen",
+			input:  "hello",
+			maxLen: 0,
+			want:   "",
+		},
+		{
+			name:   "string fits within maxLen",
+			input:  "hello",
+			maxLen: 10,
+			want:   "hello",
+		},
+		{
+			name:   "exact fit",
+			input:  "hello",
+			maxLen: 5,
+			want:   "hello",
+		},
+		{
+			name:   "standard ascii truncation",
+			input:  "hello world",
+			maxLen: 8,
+			want:   "hello...",
+		},
+		{
+			name:   "maxLen 3 with no space for ellipsis",
+			input:  "hello",
+			maxLen: 3,
+			want:   "hel",
+		},
+		{
+			name:   "maxLen 2 with no space for ellipsis",
+			input:  "hello",
+			maxLen: 2,
+			want:   "he",
+		},
+		{
+			name:   "maxLen 1 with no space for ellipsis",
+			input:  "hello",
+			maxLen: 1,
+			want:   "h",
+		},
+		{
+			name:   "cjk wide characters truncated safely",
+			input:  "你好世界",
+			maxLen: 5,
+			want:   "你...",
+		},
+		{
+			name:   "regression: slice bounds out of range with wide chars",
+			input:  "你好",
+			maxLen: 3,
+			want:   "你",
+		},
+		{
+			name:   "regression: emoji with maxLen 3",
+			input:  "🔥🔥",
+			maxLen: 3,
+			want:   "🔥",
+		},
+		{
+			name:   "regression: emoji with maxLen 2",
+			input:  "🔥🔥",
+			maxLen: 2,
+			want:   "🔥",
+		},
+		{
+			name:   "emojis with room for ellipsis",
+			input:  "🔥🔥🔥🔥",
+			maxLen: 7,
+			want:   "🔥🔥...",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := truncateRunes(tt.input, tt.maxLen)
+			if got != tt.want {
+				t.Errorf("truncateRunes(%q, %d) = %q, want %q", tt.input, tt.maxLen, got, tt.want)
+			}
+			if tt.maxLen > 0 {
+				w := lipgloss.Width(got)
+				if w > tt.maxLen {
+					t.Errorf("truncateRunes(%q, %d) visual width = %d, exceeds maxLen %d", tt.input, tt.maxLen, w, tt.maxLen)
+				}
+			}
+		})
+	}
+}
+
+func TestFormatBytesCompact(t *testing.T) {
+	tests := []struct {
+		bytes int64
+		want  string
+	}{
+		{0, "0B"},
+		{500, "500B"},
+		{1023, "1023B"},
+		{1024, "1.0K"},
+		{43100, "42.1K"},
+		{1887436, "1.8M"},
+		{1073741824, "1.0G"},
+		{1099511627776, "1.0T"},
+	}
+
+	for _, tt := range tests {
+		if got := formatBytesCompact(tt.bytes); got != tt.want {
+			t.Errorf("formatBytesCompact(%d) = %q, want %q", tt.bytes, got, tt.want)
+		}
+	}
+}
+

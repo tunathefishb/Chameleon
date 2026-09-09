@@ -68,3 +68,19 @@ func TestLoadThemeJSON5(t *testing.T) {
 		t.Fatalf("expected TitleInactive default 245, got %s", theme.TitleInactive)
 	}
 }
+
+func TestThemeStatusTokens(t *testing.T) {
+	def := DefaultTheme()
+	if def.Error != "196" || def.Success != "46" {
+		t.Errorf("DefaultTheme Error=%s, Success=%s, want 196, 46", def.Error, def.Success)
+	}
+	acc := AccessibleTheme()
+	if acc.Error != "9" || acc.Success != "10" {
+		t.Errorf("AccessibleTheme Error=%s, Success=%s, want 9, 10", acc.Error, acc.Success)
+	}
+	light := LightTheme()
+	if light.Error != "160" || light.Success != "28" {
+		t.Errorf("LightTheme Error=%s, Success=%s, want 160, 28", light.Error, light.Success)
+	}
+}
+

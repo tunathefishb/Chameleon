@@ -1,10 +1,13 @@
 package analyzer
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -80,7 +83,23 @@ func (a *Analyzer) Analyze(ctx context.Context, targetURL string) (*Report, erro
 
 	parsedURL, err := url.Parse(targetURL)
 	if err != nil || parsedURL.Scheme == "" || parsedURL.Host == "" {
-		return nil, fmt.Errorf("invalid URL: %s", targetURL)
+		parseErr := err
+		if parseErr == nil {
+			parseErr = fmt.Errorf("missing scheme or host in %s", targetURL)
+		}
+		return &Report{
+			URL:               targetURL,
+			EthicalGrade:      "F",
+			EthicalScore:      0,
+			EthicalDetails:    []string{"❌ Target URL parsing failed"},
+			DifficultyScore:   10,
+			DifficultyLevel:   "Extreme",
+			DifficultyDetails: []string{fmt.Sprintf("❌ Invalid URL: %v", parseErr)},
+			RateLimitInfo:     "Passive: No rate limit headers detected",
+			Recommendation:    fmt.Sprintf("Invalid target URL (%s). Please provide a valid HTTP/HTTPS URL.", targetURL),
+			Duration:          time.Since(start),
+			AnalyzedAt:        time.Now(),
+		}, nil
 	}
 
 	report := &Report{
@@ -167,6 +186,39 @@ func (a *Analyzer) fetchTarget(ctx context.Context, targetURL string) (*targetRe
 	}, nil
 }
 
+// matchRobotsPath matches targetPath against a robots.txt rule pattern supporting RFC 9309 wildcards (*) and end anchors ($).
+func matchRobotsPath(pattern, path string) bool {
+	if pattern == "" {
+		return false
+	}
+	if !strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, "$") {
+		return strings.HasPrefix(path, pattern)
+	}
+
+	var b strings.Builder
+	b.WriteString("^")
+	hasEndAnchor := strings.HasSuffix(pattern, "$")
+	patToConvert := pattern
+	if hasEndAnchor {
+		patToConvert = pattern[:len(pattern)-1]
+	}
+	parts := strings.Split(patToConvert, "*")
+	for i, p := range parts {
+		if i > 0 {
+			b.WriteString(".*")
+		}
+		b.WriteString(regexp.QuoteMeta(p))
+	}
+	if hasEndAnchor {
+		b.WriteString("$")
+	}
+	re, err := regexp.Compile(b.String())
+	if err != nil {
+		return strings.HasPrefix(path, pattern)
+	}
+	return re.MatchString(path)
+}
+
 func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report *Report) {
 	robotsURL := fmt.Sprintf("%s://%s/robots.txt", u.Scheme, u.Host)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, robotsURL, nil)
@@ -190,13 +242,23 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 		return
 	}
 
-	robotsText := string(body)
-	lines := strings.Split(robotsText, "\n")
+	type ruleGroup struct {
+		matchedDisallow string
+		matchedAllow    string
+		crawlDelay      float64
+		hasCrawlDelay   bool
+		hasDirectives   bool
+	}
 
-	isGlobalAgent := false
-	var matchedDisallow string
-	var matchedAllow string
-	var crawlDelay float64
+	var specificRules ruleGroup
+	var specificGroupActive bool
+	var hasSpecificGroup bool
+
+	var globalRules ruleGroup
+	var globalGroupActive bool
+	var hasGlobalGroup bool
+
+	inRules := false
 	hasSitemap := false
 
 	targetPath := u.Path
@@ -204,8 +266,9 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 		targetPath = "/"
 	}
 
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	scanner := bufio.NewScanner(bytes.NewReader(body))
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
 		if idx := strings.Index(line, "#"); idx != -1 {
 			line = strings.TrimSpace(line[:idx])
 		}
@@ -220,39 +283,86 @@ func (a *Analyzer) checkRobotsAndSitemap(ctx context.Context, u *url.URL, report
 		key := strings.ToLower(strings.TrimSpace(parts[0]))
 		val := strings.TrimSpace(parts[1])
 
-		if key == "user-agent" {
-			agent := strings.ToLower(val)
-			if agent == "*" || strings.Contains(agent, "chameleon") {
-				isGlobalAgent = true
-			} else {
-				isGlobalAgent = false
-			}
-		}
-
 		if key == "sitemap" {
 			hasSitemap = true
+			continue
 		}
 
-		if isGlobalAgent {
-			if key == "disallow" {
-				if val != "" && strings.HasPrefix(targetPath, val) {
-					if len(val) >= len(matchedDisallow) {
-						matchedDisallow = val
+		if key == "user-agent" {
+			if inRules {
+				specificGroupActive = false
+				globalGroupActive = false
+				inRules = false
+			}
+			agent := strings.ToLower(val)
+			tokens := strings.FieldsFunc(agent, func(r rune) bool {
+				return r == ',' || r == ' ' || r == '\t'
+			})
+			for _, tok := range tokens {
+				tok = strings.TrimSpace(tok)
+				if tok == "*" {
+					globalGroupActive = true
+					hasGlobalGroup = true
+				}
+				if strings.Contains(tok, "chameleon") {
+					specificGroupActive = true
+					hasSpecificGroup = true
+				}
+			}
+			continue
+		}
+
+		if specificGroupActive || globalGroupActive {
+			inRules = true
+			applyDirective := func(rg *ruleGroup) {
+				rg.hasDirectives = true
+				switch key {
+				case "disallow":
+					if val != "" && matchRobotsPath(val, targetPath) {
+						if len(val) >= len(rg.matchedDisallow) {
+							rg.matchedDisallow = val
+						}
+					}
+				case "allow":
+					if val != "" && matchRobotsPath(val, targetPath) {
+						if len(val) >= len(rg.matchedAllow) {
+							rg.matchedAllow = val
+						}
+					}
+				case "crawl-delay":
+					if d, err := strconv.ParseFloat(val, 64); err == nil {
+						if !math.IsNaN(d) && !math.IsInf(d, 0) && d >= 0 && d <= 86400 {
+							rg.crawlDelay = d
+							rg.hasCrawlDelay = true
+						}
 					}
 				}
 			}
-			if key == "allow" {
-				if val != "" && strings.HasPrefix(targetPath, val) {
-					if len(val) >= len(matchedAllow) {
-						matchedAllow = val
-					}
-				}
+
+			if specificGroupActive {
+				applyDirective(&specificRules)
 			}
-			if key == "crawl-delay" {
-				if d, err := strconv.ParseFloat(val, 64); err == nil {
-					crawlDelay = d
-				}
+			if globalGroupActive {
+				applyDirective(&globalRules)
 			}
+		}
+	}
+
+	var matchedDisallow string
+	var matchedAllow string
+	var crawlDelay float64
+
+	if hasSpecificGroup && specificRules.hasDirectives {
+		matchedDisallow = specificRules.matchedDisallow
+		matchedAllow = specificRules.matchedAllow
+		if specificRules.hasCrawlDelay {
+			crawlDelay = specificRules.crawlDelay
+		}
+	} else if hasGlobalGroup {
+		matchedDisallow = globalRules.matchedDisallow
+		matchedAllow = globalRules.matchedAllow
+		if globalRules.hasCrawlDelay {
+			crawlDelay = globalRules.crawlDelay
 		}
 	}
 
@@ -357,27 +467,64 @@ func (a *Analyzer) inspectHeaders(statusCode int, header http.Header, report *Re
 	}
 }
 
+// bytesContainsFold reports whether sub (lowercase ASCII) is present in b case-insensitively.
+func bytesContainsFold(b []byte, sub string) bool {
+	if len(sub) == 0 {
+		return true
+	}
+	if len(b) < len(sub) {
+		return false
+	}
+	subLen := len(sub)
+	firstLower := sub[0]
+	firstUpper := firstLower
+	if firstLower >= 'a' && firstLower <= 'z' {
+		firstUpper = firstLower - ('a' - 'A')
+	}
+	maxIdx := len(b) - subLen
+	for i := 0; i <= maxIdx; i++ {
+		c := b[i]
+		if c == firstLower || c == firstUpper {
+			match := true
+			for j := 1; j < subLen; j++ {
+				bj := b[i+j]
+				sj := sub[j]
+				if sj >= 'a' && sj <= 'z' {
+					if bj != sj && bj != sj-('a'-'A') {
+						match = false
+						break
+					}
+				} else if bj != sj {
+					match = false
+					break
+				}
+			}
+			if match {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) {
 	doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
 	if err != nil {
 		return
 	}
 
-	rawHTML := string(bodyBytes)
-	lowerHTML := strings.ToLower(rawHTML)
-
 	// 1. SPA / JavaScript Rendering check
 	isSPA := false
 	spaFramework := ""
 
 	switch {
-	case strings.Contains(rawHTML, "id=\"root\"") || strings.Contains(rawHTML, "id=\"__next\""):
+	case bytes.Contains(bodyBytes, []byte(`id="root"`)) || bytes.Contains(bodyBytes, []byte(`id="__next"`)):
 		isSPA = true
 		spaFramework = "React / Next.js"
-	case strings.Contains(rawHTML, "id=\"app\"") || strings.Contains(rawHTML, "id=\"__nuxt\""):
+	case bytes.Contains(bodyBytes, []byte(`id="app"`)) || bytes.Contains(bodyBytes, []byte(`id="__nuxt"`)):
 		isSPA = true
 		spaFramework = "Vue / Nuxt"
-	case strings.Contains(rawHTML, "ng-version") || strings.Contains(rawHTML, "app-root"):
+	case bytes.Contains(bodyBytes, []byte("ng-version")) || bytes.Contains(bodyBytes, []byte("app-root")):
 		isSPA = true
 		spaFramework = "Angular"
 	}
@@ -386,7 +533,7 @@ func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) 
 	bodyText := strings.TrimSpace(doc.Find("body").Text())
 	scriptCount := doc.Find("script").Length()
 
-	if isSPA || (len(bodyText) < 150 && scriptCount > 3 && len(rawHTML) > 2000) {
+	if isSPA || (len(bodyText) < 150 && scriptCount > 3 && len(bodyBytes) > 2000) {
 		report.DifficultyScore += 3
 		name := "Single Page Application (SPA)"
 		if spaFramework != "" {
@@ -401,18 +548,22 @@ func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) 
 	obfuscatedClasses := 0
 	sampleClasses := 0
 
-	doc.Find("[class]").Each(func(_ int, s *goquery.Selection) {
-		if sampleClasses > 50 {
-			return
+	doc.Find("[class]").EachWithBreak(func(_ int, s *goquery.Selection) bool {
+		if sampleClasses >= 50 {
+			return false
 		}
 		classVal, _ := s.Attr("class")
 		classes := strings.Fields(classVal)
 		for _, c := range classes {
 			sampleClasses++
-			if hexHashRegex.MatchString(c) || strings.HasPrefix(c, "css-") || strings.HasPrefix(c, "sc-") || (len(c) == 8 && classHashRegex.MatchString(c)) {
+			if hexHashRegex.MatchString(c) || strings.HasPrefix(c, "css-") || strings.HasPrefix(c, "sc-") || (len(c) >= 5 && len(c) <= 10 && classHashRegex.MatchString(c)) {
 				obfuscatedClasses++
 			}
+			if sampleClasses >= 50 {
+				return false
+			}
 		}
+		return true
 	})
 
 	if sampleClasses > 10 && float64(obfuscatedClasses)/float64(sampleClasses) > 0.4 {
@@ -422,15 +573,14 @@ func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) 
 
 	// 3. Honeypot Links detection
 	honeypotFound := false
-	doc.Find("a").Each(func(_ int, s *goquery.Selection) {
-		if honeypotFound {
-			return
-		}
+	doc.Find("a").EachWithBreak(func(_ int, s *goquery.Selection) bool {
 		style, _ := s.Attr("style")
 		cleanStyle := strings.ToLower(strings.ReplaceAll(style, " ", ""))
 		if strings.Contains(cleanStyle, "display:none") || strings.Contains(cleanStyle, "visibility:hidden") || strings.Contains(cleanStyle, "opacity:0") {
 			honeypotFound = true
+			return false
 		}
+		return true
 	})
 
 	if honeypotFound {
@@ -449,12 +599,18 @@ func (a *Analyzer) inspectContent(_ *url.URL, bodyBytes []byte, report *Report) 
 	})
 
 	// 5. Copyright / Terms of Service indicators
-	if strings.Contains(lowerHTML, "all rights reserved") || strings.Contains(lowerHTML, "terms of service") || strings.Contains(lowerHTML, "terms of use") {
+	if bytesContainsFold(bodyBytes, "all rights reserved") || bytesContainsFold(bodyBytes, "terms of service") || bytesContainsFold(bodyBytes, "terms of use") {
 		report.EthicalDetails = append(report.EthicalDetails, "📜 Terms of Service / Copyright notice identified in page footer")
 	}
 
 	// 6. JSON-LD / Structured Data (Makes scraping much easier!)
-	jsonLDCount := doc.Find("script[type='application/ld+json']").Length()
+	jsonLDCount := 0
+	doc.Find("script[type='application/ld+json']").Each(func(_ int, s *goquery.Selection) {
+		content := strings.TrimSpace(s.Text())
+		if content != "" && json.Valid([]byte(content)) {
+			jsonLDCount++
+		}
+	})
 	if jsonLDCount > 0 {
 		report.DifficultyDetails = append(report.DifficultyDetails, fmt.Sprintf("💎 Structured JSON-LD metadata available (%d block(s))", jsonLDCount))
 		if report.DifficultyScore > 1 {

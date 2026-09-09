@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -69,12 +70,14 @@ type Engine struct {
 	Discovered chan string
 	Analysis   chan analyzer.Report
 
-	analyzer *analyzer.Analyzer
-	limiter  *rate.Limiter
-	client   *http.Client
-	wg       sync.WaitGroup
-	ctx      context.Context
-	cancel   context.CancelFunc
+	analyzer  *analyzer.Analyzer
+	limiterMu sync.Mutex
+	limiter   *rate.Limiter
+	client    *http.Client
+	wg        sync.WaitGroup
+	sendWg    sync.WaitGroup
+	ctx       context.Context
+	cancel    context.CancelFunc
 
 	visited sync.Map
 
@@ -86,6 +89,8 @@ type Engine struct {
 	allJobsMu  sync.Mutex
 	allJobs    map[string]Job
 	stopOnce   sync.Once
+	closeMu    sync.RWMutex
+	isClosed   bool
 }
 
 func NewEngine() *Engine {
@@ -118,11 +123,16 @@ func (e *Engine) Stop() {
 	e.stopOnce.Do(func() {
 		e.cancel()
 		e.wg.Wait()
+		e.sendWg.Wait()
+
+		e.closeMu.Lock()
+		e.isClosed = true
 		close(e.Jobs)
 		close(e.Results)
 		close(e.Files)
 		close(e.Discovered)
 		close(e.Analysis)
+		e.closeMu.Unlock()
 	})
 }
 
@@ -149,16 +159,7 @@ func (e *Engine) AddJob(rawURL string, settings Settings) {
 		e.allJobsMu.Unlock()
 		e.jobStates.Store(targetURL, StatusQueued)
 
-		select {
-		case e.Jobs <- job:
-		default:
-			go func() {
-				select {
-				case <-e.ctx.Done():
-				case e.Jobs <- job:
-				}
-			}()
-		}
+		e.dispatchJob(job)
 	}
 }
 
@@ -215,16 +216,7 @@ func (e *Engine) ResumeJob(url string) {
 	}
 
 	if job.URL != "" {
-		select {
-		case e.Jobs <- job:
-		default:
-			go func() {
-				select {
-				case <-e.ctx.Done():
-				case e.Jobs <- job:
-				}
-			}()
-		}
+		e.dispatchJob(job)
 	}
 }
 
@@ -234,6 +226,10 @@ func (e *Engine) StopJob(url string) {
 	e.pausedMu.Lock()
 	delete(e.pausedJobs, url)
 	e.pausedMu.Unlock()
+
+	e.allJobsMu.Lock()
+	delete(e.allJobs, url)
+	e.allJobsMu.Unlock()
 
 	e.visited.Delete(url)
 
@@ -288,24 +284,18 @@ func (e *Engine) PauseAll() {
 func (e *Engine) ResumeAll() {
 	e.pausedMu.Lock()
 	urls := make([]string, 0, len(e.pausedJobs))
+	seen := make(map[string]bool, len(e.pausedJobs))
 	for u := range e.pausedJobs {
 		urls = append(urls, u)
+		seen[u] = true
 	}
 	e.pausedMu.Unlock()
 
 	e.allJobsMu.Lock()
 	for u := range e.allJobs {
-		if e.GetJobStatus(u) == StatusPaused {
-			found := false
-			for _, pu := range urls {
-				if pu == u {
-					found = true
-					break
-				}
-			}
-			if !found {
-				urls = append(urls, u)
-			}
+		if e.GetJobStatus(u) == StatusPaused && !seen[u] {
+			urls = append(urls, u)
+			seen[u] = true
 		}
 	}
 	e.allJobsMu.Unlock()
@@ -347,28 +337,73 @@ func (e *Engine) AnalyzeURL(targetURL string) {
 	go func() {
 		defer e.wg.Done()
 		report, err := e.analyzer.Analyze(e.ctx, targetURL)
-		if err == nil && report != nil {
-			select {
-			case <-e.ctx.Done():
-			case e.Analysis <- *report:
+		if err != nil || report == nil {
+			errMsg := "analysis failed"
+			if err != nil {
+				errMsg = err.Error()
 			}
+			report = &analyzer.Report{
+				URL:               targetURL,
+				EthicalGrade:      "F",
+				EthicalScore:      0,
+				EthicalDetails:    []string{"❌ Target URL analysis failed"},
+				DifficultyScore:   10,
+				DifficultyLevel:   "Extreme",
+				DifficultyDetails: []string{fmt.Sprintf("❌ Error: %s", errMsg)},
+				Recommendation:    fmt.Sprintf("Analysis failed: %s. Please verify the URL structure.", errMsg),
+				AnalyzedAt:        time.Now(),
+			}
+		}
+
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+
+		e.closeMu.RLock()
+		defer e.closeMu.RUnlock()
+		if e.isClosed {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+		case e.Analysis <- *report:
 		}
 	}()
 }
 
-func resolveSavePath(u *url.URL, isImage bool) string {
-	host := u.Host
-	if host == "" {
-		host = "unknown"
+func sanitizeHost(u *url.URL) string {
+	if u == nil {
+		return "unknown"
 	}
+	rawHost := u.Host
+	host := u.Hostname()
+	if host == "" {
+		if h, _, err := net.SplitHostPort(rawHost); err == nil && h != "" {
+			host = h
+		} else {
+			host = rawHost
+		}
+	}
+	host = strings.TrimPrefix(host, "[")
+	host = strings.TrimSuffix(host, "]")
 	host = strings.ReplaceAll(host, "/", "_")
 	host = strings.ReplaceAll(host, "\\", "_")
+	host = strings.ReplaceAll(host, ":", "_")
 	host = strings.ReplaceAll(host, "..", "_")
 	host = strings.Trim(host, ". ")
 	if host == "" {
 		host = "unknown"
 	}
+	return host
+}
 
+func resolveSavePath(u *url.URL, isImage bool) string {
+	if u == nil {
+		return ""
+	}
+	host := sanitizeHost(u)
 	baseDir := filepath.Join("output", host)
 
 	cleanPath := path.Clean("/" + u.Path)
@@ -389,10 +424,121 @@ func resolveSavePath(u *url.URL, isImage bool) string {
 
 	cleanBase := filepath.Clean(baseDir)
 	cleanFull := filepath.Clean(fullPath)
-	if !strings.HasPrefix(cleanFull, cleanBase+string(filepath.Separator)) && cleanFull != cleanBase {
+
+	if cleanFull == cleanBase || targetRel == "" {
+		if isImage {
+			cleanFull = filepath.Join(cleanBase, "image")
+		} else {
+			cleanFull = filepath.Join(cleanBase, "index.html")
+		}
+	}
+
+	if !strings.HasPrefix(cleanFull, cleanBase+string(filepath.Separator)) {
 		return ""
 	}
 	return cleanFull
+}
+
+func isSafeOutputPath(targetPath string) bool {
+	cleanOutput, err := filepath.Abs("output")
+	if err != nil {
+		cleanOutput = filepath.Clean("output")
+	}
+
+	// 1. Check if the target file itself is a symlink pointing outside output/
+	if fi, err := os.Lstat(targetPath); err == nil && (fi.Mode()&os.ModeSymlink != 0) {
+		dest, err := filepath.EvalSymlinks(targetPath)
+		if err != nil {
+			return false
+		}
+		absDest, err := filepath.Abs(dest)
+		if err != nil {
+			return false
+		}
+		if !strings.HasPrefix(absDest, cleanOutput+string(filepath.Separator)) {
+			return false
+		}
+	}
+
+	// 2. Check parent directories for symlinks pointing outside output/
+	dir := filepath.Dir(targetPath)
+	for dir != "." && dir != "/" && dir != "" {
+		if fi, err := os.Lstat(dir); err == nil {
+			if fi.Mode()&os.ModeSymlink != 0 {
+				dest, err := filepath.EvalSymlinks(dir)
+				if err != nil {
+					return false
+				}
+				absDest, err := filepath.Abs(dest)
+				if err != nil {
+					return false
+				}
+				if !strings.HasPrefix(absDest, cleanOutput+string(filepath.Separator)) && absDest != cleanOutput {
+					return false
+				}
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return true
+}
+
+func isLocalOrPrivateHost(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast()
+	}
+	return false
+}
+
+func isDisallowedHostOrIP(host string) bool {
+	h := strings.ToLower(strings.TrimSpace(host))
+	if h == "169.254.169.254" || h == "metadata.google.internal" || h == "localhost" || strings.HasSuffix(h, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(h)
+	if ip != nil {
+		return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified()
+	}
+	return false
+}
+
+func isAllowedCrawlTarget(parentURL, targetURL *url.URL) bool {
+	if parentURL == nil || targetURL == nil {
+		return false
+	}
+	parentHost := strings.ToLower(parentURL.Hostname())
+	targetHost := strings.ToLower(targetURL.Hostname())
+	if targetHost == "" {
+		return false
+	}
+
+	// 1. Same host/domain restriction
+	if parentHost != "" && !strings.EqualFold(parentHost, targetHost) {
+		return false
+	}
+
+	// 2. SSRF Guard against cloud metadata and loopback/private IPs
+	if !isLocalOrPrivateHost(parentHost) {
+		if isDisallowedHostOrIP(targetHost) {
+			return false
+		}
+	} else {
+		// Even if parent is local, always block cloud metadata
+		if targetHost == "169.254.169.254" || targetHost == "metadata.google.internal" {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (e *Engine) worker() {
@@ -409,7 +555,7 @@ func (e *Engine) worker() {
 
 func (e *Engine) processJob(job Job) {
 	st := e.GetJobStatus(job.URL)
-	if st == StatusStopped {
+	if st == StatusStopped || st == StatusDone {
 		return
 	}
 	if st == StatusPaused {
@@ -420,11 +566,13 @@ func (e *Engine) processJob(job Job) {
 	}
 
 	// Adjust rate limit based on speed
+	e.limiterMu.Lock()
 	if job.Settings.Speed == SpeedFast {
 		e.limiter.SetLimit(rate.Every(200 * time.Millisecond))
 	} else {
 		e.limiter.SetLimit(rate.Every(1 * time.Second))
 	}
+	e.limiterMu.Unlock()
 
 	jobCtx, jobCancel := context.WithCancel(e.ctx)
 	e.jobCancels.Store(job.URL, jobCancel)
@@ -462,7 +610,7 @@ func (e *Engine) processJob(job Job) {
 	req, err := http.NewRequestWithContext(jobCtx, http.MethodGet, job.URL, nil)
 	if err != nil {
 		e.jobStates.Store(job.URL, StatusError)
-		e.Results <- Result{
+		e.sendResult(Result{
 			Name:      job.URL,
 			Status:    "ERR",
 			Type:      "-",
@@ -472,7 +620,7 @@ func (e *Engine) processJob(job Job) {
 			Method:    http.MethodGet,
 			ErrorMsg:  err.Error(),
 			Timestamp: time.Now(),
-		}
+		})
 		return
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (compatible; ChameleonBot/1.0; +https://example.com/bot)")
@@ -492,7 +640,7 @@ func (e *Engine) processJob(job Job) {
 			return
 		}
 		e.jobStates.Store(job.URL, StatusError)
-		e.Results <- Result{
+		e.sendResult(Result{
 			Name:      job.URL,
 			Status:    "ERR",
 			Type:      "-",
@@ -502,7 +650,7 @@ func (e *Engine) processJob(job Job) {
 			Method:    http.MethodGet,
 			ErrorMsg:  err.Error(),
 			Timestamp: start,
-		}
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -548,14 +696,16 @@ func (e *Engine) processJob(job Job) {
 	}
 
 	parsedURL, _ := url.Parse(job.URL)
-	name := parsedURL.Path
-	if name == "" || name == "/" {
-		name = "index.html"
-	} else {
-		name = filepath.Base(name)
+	name := "index.html"
+	if parsedURL != nil && parsedURL.Path != "" && parsedURL.Path != "/" {
+		name = filepath.Base(parsedURL.Path)
 	}
 
-	e.jobStates.Store(job.URL, StatusDone)
+	if resp.StatusCode >= 400 {
+		e.jobStates.Store(job.URL, StatusError)
+	} else {
+		e.jobStates.Store(job.URL, StatusDone)
+	}
 
 	e.sendResult(Result{
 		Name:            name,
@@ -571,7 +721,7 @@ func (e *Engine) processJob(job Job) {
 	})
 
 	// 2. Save File & Process HTML
-	if resp.StatusCode == http.StatusOK {
+	if resp.StatusCode == http.StatusOK && parsedURL != nil {
 		isImg := strings.HasPrefix(contentType, "image/")
 		savePath := resolveSavePath(parsedURL, isImg)
 		if savePath == "" {
@@ -591,6 +741,11 @@ func (e *Engine) processJob(job Job) {
 			_ = os.Rename(htmlDir, htmlDir+".file")
 		}
 
+		// Guard against symlink traversal
+		if !isSafeOutputPath(savePath) {
+			return
+		}
+
 		// Check if HTML and process links & images
 		if strings.Contains(contentType, "text/html") {
 			doc, err := goquery.NewDocumentFromReader(bytes.NewReader(bodyBytes))
@@ -606,6 +761,9 @@ func (e *Engine) processJob(job Job) {
 						}
 						imgURL, err := parsedURL.Parse(rawSrc)
 						if err != nil || (imgURL.Scheme != "http" && imgURL.Scheme != "https") {
+							return rawSrc, false
+						}
+						if !isLocalOrPrivateHost(parsedURL.Hostname()) && isDisallowedHostOrIP(imgURL.Hostname()) {
 							return rawSrc, false
 						}
 						imgURL.Fragment = ""
@@ -627,16 +785,7 @@ func (e *Engine) processJob(job Job) {
 							e.allJobsMu.Unlock()
 							e.jobStates.Store(imgURLStr, StatusQueued)
 
-							select {
-							case e.Jobs <- imgJob:
-							default:
-								go func() {
-									select {
-									case <-e.ctx.Done():
-									case e.Jobs <- imgJob:
-									}
-								}()
-							}
+							e.dispatchJob(imgJob)
 							e.sendDiscovered(imgURLStr)
 						}
 
@@ -716,6 +865,11 @@ func (e *Engine) processJob(job Job) {
 									absoluteURL.Fragment = ""
 									urlStr := absoluteURL.String()
 
+									// Traversal Scope & SSRF Guard
+									if !isAllowedCrawlTarget(parsedURL, absoluteURL) {
+										return
+									}
+
 									if _, loaded := e.visited.LoadOrStore(urlStr, true); !loaded {
 										childJob := Job{
 											URL:      urlStr,
@@ -727,16 +881,7 @@ func (e *Engine) processJob(job Job) {
 										e.allJobsMu.Unlock()
 										e.jobStates.Store(urlStr, StatusQueued)
 
-										select {
-										case e.Jobs <- childJob:
-										default:
-											go func() {
-												select {
-												case <-e.ctx.Done():
-												case e.Jobs <- childJob:
-												}
-											}()
-										}
+										e.dispatchJob(childJob)
 										e.sendDiscovered(urlStr)
 									}
 								}
@@ -766,41 +911,175 @@ func (e *Engine) processJob(job Job) {
 func (e *Engine) sendResult(res Result) {
 	select {
 	case <-e.ctx.Done():
-	case e.Results <- res:
+		return
 	default:
-		go func() {
-			select {
-			case <-e.ctx.Done():
-			case e.Results <- res:
-			}
-		}()
 	}
+
+	e.closeMu.RLock()
+	if e.isClosed {
+		e.closeMu.RUnlock()
+		return
+	}
+	select {
+	case <-e.ctx.Done():
+		e.closeMu.RUnlock()
+		return
+	case e.Results <- res:
+		e.closeMu.RUnlock()
+		return
+	default:
+		e.closeMu.RUnlock()
+	}
+
+	e.sendWg.Add(1)
+	go func() {
+		defer e.sendWg.Done()
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+		e.closeMu.RLock()
+		defer e.closeMu.RUnlock()
+		if e.isClosed {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case e.Results <- res:
+		}
+	}()
 }
 
 func (e *Engine) sendFile(path string) {
 	select {
 	case <-e.ctx.Done():
-	case e.Files <- path:
+		return
 	default:
-		go func() {
-			select {
-			case <-e.ctx.Done():
-			case e.Files <- path:
-			}
-		}()
 	}
+
+	e.closeMu.RLock()
+	if e.isClosed {
+		e.closeMu.RUnlock()
+		return
+	}
+	select {
+	case <-e.ctx.Done():
+		e.closeMu.RUnlock()
+		return
+	case e.Files <- path:
+		e.closeMu.RUnlock()
+		return
+	default:
+		e.closeMu.RUnlock()
+	}
+
+	e.sendWg.Add(1)
+	go func() {
+		defer e.sendWg.Done()
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+		e.closeMu.RLock()
+		defer e.closeMu.RUnlock()
+		if e.isClosed {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case e.Files <- path:
+		}
+	}()
 }
 
 func (e *Engine) sendDiscovered(u string) {
 	select {
 	case <-e.ctx.Done():
-	case e.Discovered <- u:
+		return
 	default:
-		go func() {
-			select {
-			case <-e.ctx.Done():
-			case e.Discovered <- u:
-			}
-		}()
 	}
+
+	e.closeMu.RLock()
+	if e.isClosed {
+		e.closeMu.RUnlock()
+		return
+	}
+	select {
+	case <-e.ctx.Done():
+		e.closeMu.RUnlock()
+		return
+	case e.Discovered <- u:
+		e.closeMu.RUnlock()
+		return
+	default:
+		e.closeMu.RUnlock()
+	}
+
+	e.sendWg.Add(1)
+	go func() {
+		defer e.sendWg.Done()
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+		e.closeMu.RLock()
+		defer e.closeMu.RUnlock()
+		if e.isClosed {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case e.Discovered <- u:
+		}
+	}()
+}
+
+func (e *Engine) dispatchJob(job Job) {
+	select {
+	case <-e.ctx.Done():
+		return
+	default:
+	}
+
+	e.closeMu.RLock()
+	if e.isClosed {
+		e.closeMu.RUnlock()
+		return
+	}
+	select {
+	case <-e.ctx.Done():
+		e.closeMu.RUnlock()
+		return
+	case e.Jobs <- job:
+		e.closeMu.RUnlock()
+		return
+	default:
+		e.closeMu.RUnlock()
+	}
+
+	e.sendWg.Add(1)
+	go func() {
+		defer e.sendWg.Done()
+		select {
+		case <-e.ctx.Done():
+			return
+		default:
+		}
+		e.closeMu.RLock()
+		defer e.closeMu.RUnlock()
+		if e.isClosed {
+			return
+		}
+		select {
+		case <-e.ctx.Done():
+			return
+		case e.Jobs <- job:
+		}
+	}()
 }
